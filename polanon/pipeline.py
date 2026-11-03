@@ -69,7 +69,8 @@ class _TokenAllocator:
     def _reserve(self, token: str) -> None:
         """Keep new tokens from reusing the number of `token`."""
         match = TOKEN_RE.fullmatch(token)
-        if match is not None:
+        # Long input numbers may be identifiers, and int() rejects very long digit strings.
+        if match is not None and len(match.group("n")) <= 6:
             label, number = match.group("label"), int(match.group("n"))
             self._counters[label] = max(self._counters.get(label, 0), number)
 

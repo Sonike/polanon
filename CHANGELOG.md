@@ -8,6 +8,8 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- Token-shaped input with more than six digits no longer seeds later token numbers or crashes
+  masking when the number exceeds Python's integer conversion limit (#10).
 - **E-mail addresses with Polish letters** are masked whole: `zofia.żak@example.com` was masked
   as a name and half an address, and an address on an internationalised domain not at all.
   Contributed by ShahadatTest in [#14](https://github.com/boromat/polanon/pull/14).
