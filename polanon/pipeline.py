@@ -17,12 +17,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from polanon._detection import detect
+from polanon._known_parts import known_parts
 from polanon._matching import (
     TOKEN_RE,
     Haystack,
     Ranges,
     folds,
     known_value_matches,
+    place_known_values,
     type_of,
     value_keys,
 )
@@ -32,7 +34,8 @@ from polanon.guards.base import Guard
 from polanon.judge.base import Judge, JudgeError, JudgeFinding
 from polanon.judge.parsing import MIN_FINDING_CHARS
 from polanon.policy import ENTITY_TYPES, token_for
-from polanon.types import AnonymizationResult, JudgeFallback, Span, merge_spans
+from polanon.pseudonyms import Pseudonyms, owner_lookup
+from polanon.types import AnonymizationResult, JudgeFallback, Span, _trim, merge_spans
 
 
 class _TokenAllocator:
@@ -47,14 +50,28 @@ class _TokenAllocator:
     Token-shaped text the caller wrote is never handed out again, so a template's literal
     "<PESEL_1>" cannot collide with a real PESEL and turn into it on restore. Such a token joins the
     mapping as standing for itself, which carries the reservation into the next turn with the
-    mapping the caller already passes along. Numbers longer than six digits do not advance the
-    counter, but allocation still skips every token already present in the mapping.
+    mapping the caller already passes along. With numbered tokens, numbers longer than six digits
+    do not advance the counter, but allocation still skips every token already in the mapping.
+
+    With `pseudonyms`, a new value's token is computed rather than counted, so it is the same in
+    every document and process. One that another value of the mapping already holds is lengthened
+    past it. Token-shaped text equal to it is the value's own token written back, and takes the
+    value: a placeholder numbered by hand never has twelve digits that match an HMAC.
     """
 
-    def __init__(self, existing_mapping: dict[str, str], reserved: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        existing_mapping: dict[str, str],
+        reserved: Iterable[str] = (),
+        pseudonyms: Pseudonyms | None = None,
+    ) -> None:
         self._mapping: dict[str, str] = dict(existing_mapping)
         self._by_value: dict[tuple[str, str], str] = {}
         self._counters: dict[str, int] = {}
+        self._pseudonyms = pseudonyms
+        self._taken = (
+            None if pseudonyms is None else owner_lookup(pseudonyms, self._mapping, type_of)
+        )
         for token, value in existing_mapping.items():
             entity_type = type_of(token)
             if entity_type is None:
@@ -70,8 +87,8 @@ class _TokenAllocator:
     def _reserve(self, token: str) -> None:
         """Advance the counter for token numbers of at most six digits.
 
-        Longer numbers are not reserved in the counter; allocate still never reuses a token
-        already present in the mapping.
+        Longer numbers are not reserved in the counter; numbered allocation still never reuses
+        a token already present in the mapping.
         """
         match = TOKEN_RE.fullmatch(token)
         # Long input numbers may be identifiers, and int() rejects very long digit strings.
@@ -90,16 +107,23 @@ class _TokenAllocator:
             known = self._by_value.get(key)
             if known is not None:
                 return known
-        label = ENTITY_TYPES.get(entity_type, entity_type)
-        number = self._counters.get(label, 0) + 1
-        token = token_for(entity_type, number)
-        while token in self._mapping:
-            number += 1
+        if self._pseudonyms is not None and self._taken is not None:
+            token = self._pseudonyms.allocate(value, entity_type, self._taken)
+        else:
+            label = ENTITY_TYPES.get(entity_type, entity_type)
+            number = self._counters.get(label, 0) + 1
             token = token_for(entity_type, number)
-        self._counters[label] = number
+            while token in self._mapping:
+                number += 1
+                token = token_for(entity_type, number)
+            self._counters[label] = number
         for key in keys:
             self._by_value.setdefault(key, token)
-        self._mapping[token] = value
+        if self._mapping.get(token) == token:
+            # The value's own stable token, written in the text before: it now stands for it.
+            self._mapping[token] = value
+        # Another spelling of the value may hold the token already: the first one written stays.
+        self._mapping.setdefault(token, value)
         return token
 
     @property
@@ -152,6 +176,41 @@ def mask_known_values(text: str, mapping: dict[str, str]) -> str:
 
 def _token_ranges(text: str) -> list[tuple[int, int]]:
     return [(m.start(), m.end()) for m in TOKEN_RE.finditer(text)]
+
+
+def _masked_already(text: str, mapping: dict[str, str]) -> list[tuple[int, int]]:
+    """Return where `text` holds a token the mapping keeps for a value: text masked before.
+
+    History sent again or a passage from a search index carries such tokens, and what a detector
+    reads inside one is the token, not data. "<OSOBA_50810112354>" holds no PESEL, and a language
+    model that took "OSOBA_8" for a place sent "<<MIEJSCE_1>>", which restores to nobody. A
+    placeholder the caller typed stands for itself and shelters nothing, and neither does
+    token-shaped text the mapping hides as a value, such as a password written "<ADMIN_2024>".
+    """
+    hidden = {value.strip() for token, value in mapping.items() if value != token}
+    return [
+        match.span()
+        for match in TOKEN_RE.finditer(text)
+        if mapping.get(match[0], match[0]) != match[0] and match[0] not in hidden
+    ]
+
+
+def _outside(spans: list[Span], ranges: list[tuple[int, int]], text: str) -> list[Span]:
+    """Cut `ranges` out of every span, keeping the pieces that still hold a letter or a digit."""
+    holes = Ranges(ranges)
+    kept: list[Span] = []
+    for span in spans:
+        touching = holes.touching(span.start, span.end)
+        if not touching:
+            kept.append(span)
+            continue
+        cursor = span.start
+        for first, last in [*touching, (span.end, span.end)]:
+            start, end = _trim(text, cursor, first)
+            if start < end:
+                kept.append(Span(start, end, span.entity_type, span.score, span.source))
+            cursor = max(cursor, last)
+    return kept
 
 
 def _whole_ranges(merged: list[Span], detected: list[Span]) -> set[tuple[int, int]]:
@@ -270,12 +329,27 @@ def _count(counts: dict[str, int], token: str) -> None:
     counts[entity_type] = counts.get(entity_type, 0) + 1
 
 
+#: Detections at or above this confidence come from a rule, a list or the caller, never from a
+#: language model (0.85) or the judge (0.5), so the parts of their values are trusted as well.
+_TRUSTED_SCORE = 0.9
+
+
+def _remember(
+    known: dict[tuple[str, bool], tuple[str, str]], value: str, entity_type: str, *, trusted: bool
+) -> None:
+    """Add a value to the known values, with the parts of it that identify on their own."""
+    known.setdefault((value.strip(), folds(entity_type)), (value, entity_type))
+    for part in known_parts(value, entity_type, trusted=trusted):
+        known.setdefault((part, folds(entity_type)), (part, entity_type))
+
+
 def _mask_stage1(
     text: str,
     detected: list[Span],
     existing_mapping: dict[str, str],
     allowlist: Allowlist | None,
     haystack: Haystack,
+    pseudonyms: Pseudonyms | None = None,
 ) -> _Masking:
     """Resolve the guards' detections, hand out stable tokens and substitute them.
 
@@ -285,8 +359,18 @@ def _mask_stage1(
 
     An occurrence of a known value takes in what a guard found inside it: a signature that puts
     "Jan" and "Kowalski" on two lines is read as "Jan" by the name rule, and masking that alone
-    sent the surname. Such detections give way to the occurrence, which is masked whole.
+    sent the surname. Such detections give way to the occurrence, which is masked whole. One that
+    only partly overlaps a detection, or another known value, is resolved with it as two
+    detections are, so no letter of either reaches the model.
+
+    The parts of a value that point to the same thing on their own are known values too: the
+    surname of a person, the handle in a link to a profile. See :mod:`polanon._known_parts`.
+
+    A token the mapping already holds is left whole: neither a detection nor a known value cuts
+    into it, and a detection that runs past it keeps what lies outside.
     """
+    tokens = _masked_already(text, existing_mapping)
+    detected = _outside(detected, tokens, text)
     if allowlist is not None:
         detected = allowlist.drop_allowed(detected, text)
     merged = merge_spans(detected, text)
@@ -297,21 +381,29 @@ def _mask_stage1(
     for token, value in existing_mapping.items():
         entity_type = type_of(token)
         if entity_type is not None and value != token:
-            known.setdefault((value.strip(), folds(entity_type)), (value, entity_type))
+            _remember(known, value, entity_type, trusted=False)
     for span in merged:
         if (span.start, span.end) in whole:
             value = text[span.start : span.end]
-            known.setdefault((value.strip(), folds(span.entity_type)), (value, span.entity_type))
-    occupied = [(span.start, span.end) for span in merged]
-    found = known_value_matches(text, haystack, known.values(), occupied, absorb=True)
-    covered = Ranges((start, end) for start, end, _ in found)
+            _remember(known, value, span.entity_type, trusted=span.score >= _TRUSTED_SCORE)
+    occupied = [(span.start, span.end) for span in merged] + tokens
+    placement = place_known_values(
+        text, haystack, known.values(), occupied, absorb=True, cross_occupied=True
+    )
+    held = Ranges(tokens)
+    matches = [found for found in placement.matches if not held.overlaps(found[0], found[1])]
+    covered = Ranges((start, end) for start, end, _ in matches)
     kept = [span for span in merged if not covered.overlaps(span.start, span.end)]
+    occurrences = matches + [
+        found for found in placement.crossing if not held.overlaps(found[0], found[1])
+    ]
     spans = merge_spans(
-        kept + [Span(start, end, kind, 0.9, "known_value") for start, end, kind in found], text
+        kept + [Span(start, end, kind, 0.9, "known_value") for start, end, kind in occurrences],
+        text,
     )
 
     reserved = (match.group(0) for match in TOKEN_RE.finditer(text))
-    return _substitute(text, spans, _TokenAllocator(existing_mapping, reserved))
+    return _substitute(text, spans, _TokenAllocator(existing_mapping, reserved, pseudonyms))
 
 
 def _run_stage1(
@@ -320,11 +412,13 @@ def _run_stage1(
     guards: list[Guard],
     existing_mapping: dict[str, str],
     allowlist: Allowlist | None,
+    pseudonyms: Pseudonyms | None = None,
 ) -> _Masking:
     """Detect, merge, find every known value and substitute: all of stage 1, in one thread."""
     view = detection_view(text)
     detected = detect(text, view, enabled, guards)
-    return _mask_stage1(text, detected, existing_mapping, allowlist, Haystack.of(text, view))
+    haystack = Haystack.of(text, view)
+    return _mask_stage1(text, detected, existing_mapping, allowlist, haystack, pseudonyms)
 
 
 def _apply_findings(
@@ -340,6 +434,10 @@ def _apply_findings(
     nothing inside an existing token is touched. All findings are applied in one pass, a token is
     allocated only for what is actually replaced, and every replacement is recorded in original
     coordinates, so `spans` describes exactly what the anonymized text hides.
+
+    Small models often quote overlapping pieces of one name. Findings that overlap are resolved as
+    two detections are, by :func:`~polanon.types.merge_spans`: masking only the longer one sent the
+    first name of "Ngozi Okonkwo-Brzęczyszczykiewicz z kancelarii ..." in the clear.
     """
     wanted = [
         (finding.text.strip(), finding.entity_type)
@@ -351,20 +449,25 @@ def _apply_findings(
     ]
     masked = masking.masked
     haystack = Haystack.of(masked, detection_view(masked))
-    matches = sorted(known_value_matches(masked, haystack, wanted, _token_ranges(masked)))
+    placement = place_known_values(masked, haystack, wanted, _token_ranges(masked))
+    found = [
+        Span(start, end, entity_type, 0.5, "judge")
+        for start, end, entity_type in placement.matches + placement.crossing
+    ]
+    replaced = merge_spans(found, masked)
     parts: list[str] = []
     cursor = 0
-    for start, end, entity_type in matches:
-        token = masking.allocator.allocate(masked[start:end], entity_type)
-        parts.append(masked[cursor:start])
+    for span in replaced:
+        token = masking.allocator.allocate(masked[span.start : span.end], span.entity_type)
+        parts.append(masked[cursor : span.start])
         parts.append(token)
-        cursor = end
+        cursor = span.end
         _count(masking.entity_counts, token)
-        original_start, original_end = masking.to_original(start, end)
-        masking.spans.append(Span(original_start, original_end, entity_type, 0.5, "judge"))
+        original_start, original_end = masking.to_original(span.start, span.end)
+        masking.spans.append(Span(original_start, original_end, span.entity_type, 0.5, "judge"))
     parts.append(masked[cursor:])
     masking.masked = "".join(parts)
-    masking.judge_hits += len(matches)
+    masking.judge_hits += len(replaced)
 
 
 async def anonymize(
@@ -376,6 +479,7 @@ async def anonymize(
     existing_mapping: dict[str, str],
     judge_fallback: JudgeFallback = JudgeFallback.SEND_STAGE1,
     allowlist: Allowlist | None = None,
+    pseudonyms: Pseudonyms | None = None,
 ) -> AnonymizationResult:
     """Mask sensitive data in `text` and return the masked text plus the token mapping.
 
@@ -387,6 +491,8 @@ async def anonymize(
         existing_mapping: token -> value already allocated in this conversation.
         judge_fallback: what to do when the judge fails.
         allowlist: public names left unmasked when a guard or the judge flags them as a name.
+        pseudonyms: computes stable tokens, the same in every call; tokens are numbered per
+            conversation without it.
 
     Returns:
         An `AnonymizationResult` whose `mapping` contains both inherited and newly allocated tokens.
@@ -399,7 +505,7 @@ async def anonymize(
     # caller's event loop for as long as it takes, which on a shared server means every other
     # request waits behind one long document.
     masking = await asyncio.to_thread(
-        _run_stage1, text, enabled, guards, existing_mapping, allowlist
+        _run_stage1, text, enabled, guards, existing_mapping, allowlist, pseudonyms
     )
     if judge is None:
         return masking.result()
@@ -425,10 +531,11 @@ def _anonymize_stage1(
     guards: list[Guard],
     existing_mapping: dict[str, str],
     allowlist: Allowlist | None = None,
+    pseudonyms: Pseudonyms | None = None,
 ) -> AnonymizationResult:
     """Run stage 1 in the calling thread with no event loop, for ``Anonymizer.anonymize_sync``.
 
     It never touches asyncio, so it works whether or not a loop is running in this thread, which is
     the case in a notebook or an async web handler that calls synchronous code.
     """
-    return _run_stage1(text, enabled, guards, existing_mapping, allowlist).result()
+    return _run_stage1(text, enabled, guards, existing_mapping, allowlist, pseudonyms).result()

@@ -2,9 +2,149 @@
 
 All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
-[semantic versioning](https://semver.org/spec/v2.0.0.html).
+[semantic versioning](https://semver.org/spec/v2.0.0.html); until 1.0, the second number goes up
+only for a change that breaks something, as CONTRIBUTING.md describes.
 
-## [Unreleased]
+## [0.3.2] - 2026-11-12
+
+New features and fixes, and nothing that worked before stops working: a patch release, as
+CONTRIBUTING.md describes. Without a key, tokens are numbered as before.
+
+### Added
+
+- **Stable pseudonyms** for search indexes and RAG: `Anonymizer(guards, pseudonyms=Pseudonyms(key))`
+  computes every new token with HMAC-SHA256 under a secret key of at least 32 bytes, such as
+  `<OSOBA_482193047556>`, instead of numbering it per conversation. The same value gets the same
+  token in every document, process and question, with no shared state. A person's name is read in
+  the nominative where its first name and surname agree, so "Jan Kowalski", "Jana Kowalskiego" and
+  "z Janem Kowalskim" share a token, and an identifier is one value with or without its separators
+  and country prefix. Tokens keep the `<LABEL_number>` shape, with 12 digits by default. The key is
+  never shown, pickled or copied; `key_id` and `settings` say what an index was built with, and
+  `scope=` keeps two indexes under one key apart. A collision gets four digits more and is recorded
+  in `Pseudonyms(collisions=...)`.
+- **Masking for an index**: `anonymizer.index_chunks(passages, store)` masks the passages of a
+  document with one mapping and puts what each token hides into a `MappingStore`, a two-method
+  protocol over the application's own encrypted table (`InMemoryMappingStore` for tests and
+  examples), with a person's name in the nominative and a fingerprint to tell a collision.
+  `anonymizer.mask_query(question, store)` gives a question the documents' tokens, also for a
+  surname written alone, which no rule reads and the store keeps for every indexed person. `mask_chunks`, `stored_mapping`
+  and `tokens_in` mask without a store and restore found passages and answers, also while they
+  stream; each passage also comes with its mapping as written, to restore it exactly.
+- **Haystack 3 components**, with `pip install "polanon[haystack]"`: `PolanonDocumentMasker` masks
+  documents before the splitter and the embedder of an indexing pipeline, `PolanonQueryMasker`
+  gives a question the documents' tokens, `PolanonRestorer` restores the replies and the documents
+  found, and `PolanonStreamRestorer` restores a streamed answer as a streaming callback. Nothing
+  that names a value reaches the document store: not the content, not `meta`, and no `id` that is
+  a plain hash of an original text. What the tokens stand for goes to the application's mapping
+  store only. The key is a Haystack `Secret`, read from `POLANON_KEY` and saved by name only.
+  `examples/haystack_rag.py` runs offline; `examples/haystack_openai.py` uses OpenAI and is paid.
+
+### Fixed
+
+- **A token the mapping holds is left whole** when masked text is masked again, such as a passage
+  from an index or history sent back. The digits of `<OSOBA_50810112354>` read as a PESEL, a
+  language model read `OSOBA_8` as a place, a PIN label took the token after it for the PIN, and a
+  known company called "Firma" was found inside `<FIRMA_1>`; each corrupted the token so restore no
+  longer gave the value back. A placeholder that stands for itself still shelters nothing.
+- **Titles stay out of a foreign name after a label.** "z. Hd. Frau Wiśniewska" made "Frau" the
+  first name, so every later "Frau" in the letter was masked as her, and "Attn: Mr Oliver Bennett"
+  got a token apart from the "Oliver Bennett" of its sign-off. With two titles, as in "Frau Prof.
+  Anna Schmidt", the second one was masked as the person wherever it stood.
+
+## [0.3.1] - 2026-11-11
+
+### Fixed
+
+- **A known value that only partly overlaps a new detection** is masked whole: "Nowak z
+  Kowalskich" known from an earlier turn met the name rule's "Anna Nowak", and "z Kowalskich" went
+  out in the clear. The same holds for two known values that overlap.
+- **Two findings of the judge that overlap** are both masked. A small model that quoted "Ngozi
+  Okonkwo-Brzęczyszczykiewicz" and "Okonkwo-Brzęczyszczykiewicz z kancelarii ..." had its first
+  name sent, while `judge_hits` reported success.
+- **A PIN that equals a year** stays out of two dates joined by "-" or "/", a span of years such as
+  `2024/2025` and a date ending in `2025r.`: in `01.01.<SEKRET_1>-31.12.<SEKRET_1>` the dates around
+  the token gave it away.
+- **A known short number in one long line of numbers**, such as a minified JSON array, no longer
+  makes masking quadratic: 50 KB took most of a minute, and now takes under a second.
+
+## [0.3.0] - 2026-11-11
+
+### Added
+
+- **`MaskedTurn`**, from `anonymizer.turn()`: one object for everything a call to a model sends and
+  gets back. It masks the history, the question and the results of tools with one mapping, so a
+  value keeps one token across them, restores the arguments of tool calls and the answer, also
+  while it streams, and reports invented tokens. Values the caller already knows are sensitive,
+  such as its clients' names, go in `known=` and are masked wherever they appear. When a detector
+  fails, every `mask` method raises `MaskingUnavailableError` and returns nothing half masked.
+  PolCRM and PolSales each kept a copy of this as a `Masker` of their own.
+- **`MaskedTurn.mask_messages()`** masks a whole history written for the Anthropic or the OpenAI
+  API: text, `tool_use` input, `tool_result` and `"tool"` content, the arguments of `tool_calls`.
+  Tool results and arguments written as JSON stay valid JSON, and ids and tool names are left
+  alone. A value first recognised in a later message is masked in the earlier ones too. A block
+  nothing can mask, such as an image or a model's signed reasoning, is refused, or left out with
+  `unknown_blocks="drop"`.
+- **`token_instructions("pl" | "en")`**: a note for the system prompt that tells the model what the
+  tokens are and to copy them exactly, the one both apps wrote out for themselves.
+- **`MaskingUnavailableError`**, the one error an app catches to refuse sending text it could not
+  mask, and **`NerModelUnavailableError`**, the one of them raised when spaCy or its model is
+  missing. **`ner_available()`** runs the same check as `default_guards()` without loading
+  anything, for a settings page.
+
+### Changed
+
+- `default_guards(with_ner=True)` without spaCy or its model raises `NerModelUnavailableError`
+  instead of a plain `ModuleNotFoundError`. It is a subclass of `ModuleNotFoundError` with the same
+  message, so `except ModuleNotFoundError` and `except ImportError` still catch it. Through
+  `MaskingUnavailableError` it is also a `RuntimeError`, so an `except RuntimeError` around
+  `default_guards()` now catches it too, and a check of the exact type, such as
+  `type(exc) is ModuleNotFoundError`, no longer matches. Nothing else in the 0.2.2 API changed:
+  every name and signature is still there, and every benchmark document masks to the same text,
+  tokens and spans, with the language model and without it.
+
+## [0.2.2] - 2026-11-08
+
+Found by masking synthetic CVs, profiles written as JSON and lists of repositories with the rules
+alone.
+
+### Added
+
+- **Links to a person's profile** are a new built-in type, `LINK` (tokens `<LINK_1>`): LinkedIn
+  (`linkedin.com/in/...`), GitHub, GitLab, Bitbucket, Codeberg, GitHub and GitLab Pages, Stack
+  Overflow, Kaggle, Behance, Dribbble, Medium, Instagram, Facebook, X, YouTube and a few more.
+  Only the link up to the handle is masked, so `<LINK_1>/weather-app` still names the project.
+  A LinkedIn link carried the person's name, and a GitHub login reappeared in every repository.
+  The paths of a site's own pages (`github.com/features`, `facebook.com/groups/...`,
+  `youtube.com/watch`) stay readable. A guard that declares `LINK` as its own type keeps working.
+- **The surname of a masked person and the handle of a masked profile link are masked on their
+  own** wherever they appear in the text: "Kowalski" alone after "Jan Kowalski", and
+  `"login": "jkowalski"`, `@jkowalski` and `jkowalski.github.io` after `github.com/jkowalski`, went
+  out in the clear. A lone surname in lowercase stays an ordinary word, as any known one-word name
+  does; a name only the language model found gives its surname only next to a first name the rules
+  know, and the handles of well-known brands (`github.com/microsoft/...`) stay readable.
+- **Popular first names missing from the list**: Oliwier, Cyprian, Maurycy, Celina, Ksenia,
+  Lilianna, Matylda, Melania and Otylia, with their surnames: "Oliwier Nowak" went out whole.
+
+### Fixed
+
+- **An e-mail address with its "@" written out** is masked whole: `jan.kowalski [at] example.com`,
+  `(at)`, `(małpa)`, also with `[dot]`. Only "jan" was masked, as a first name.
+- **A street written without "ul."** is masked when a postcode follows it: in
+  `Długa 5 m. 4, 00-238 Warszawa` only the postcode was. A word and a number with no postcode
+  after them, such as `Windows 11`, stay readable.
+- **A birth date written in English** is masked after its label: `Date of birth: 15 March 1985`,
+  `DOB: March 15, 1985` and `born 3rd May 1985` went out whole. With `DATE` turned on, such dates
+  are dates too.
+
+## [0.2.1] - 2026-11-08
+
+### Added
+
+- **`polanon --version`** prints the installed version. Contributed by barkya28 in
+  [#29](https://github.com/boromat/polanon/pull/29).
+- **An eleventh benchmark document**, a monthly roster of surnames and periods, which keeps names
+  beside ordinary numbers masked without a language model. The corpus now has 169 annotated
+  values: the rules alone fully mask 86% of them and the rules with `pl_core_news_md` 98%.
 
 ### Fixed
 
@@ -17,6 +157,22 @@ All notable changes to this project are recorded here. The format follows
   passes the REGON checksum, and the model was told it was a company's register number.
   Contributed by ShahadatTest in [#22](https://github.com/boromat/polanon/pull/22); "kom."
   counts as a phone label as well, and "hotel" no longer does.
+- **A phone number written with a bare 48 in front** is masked whole: `48123456789`, as SMS
+  gateways and CRM exports write it, went out unmasked, and in `48 123 456 789` the country code
+  stayed in the clear. A valid PESEL that starts with 48 keeps its type, and the minutes of a time
+  such as `10:48` are not pulled into the phone. Contributed by Aaqibhafeezkhan in
+  [#26](https://github.com/boromat/polanon/pull/26).
+- **A restored name with a case ending is not reported as new**: "dla <OSOBA_1>a" restored as
+  "Jan Kowalskia" was flagged by the output sweep as personal data the model made up. A person,
+  company or place known from the conversation now covers its Polish case endings, while a longer
+  different name, letters glued on the left, and other types such as an address with a letter
+  added are still reported. Contributed by bfs2021 in
+  [#25](https://github.com/boromat/polanon/pull/25).
+- **A month spelled like a first name is left alone in a date** written with dashes, slashes or
+  dots: "Jan" in `15-Jan-2024`, `2024/Jan/15` or `15.Jan.2024` was masked as a person. The same
+  separator has to stand on both sides, so a name beside an ordinary number, as in
+  `Nowak Anna 03/2024`, is still masked. Contributed by ShahadatTest in
+  [#23](https://github.com/boromat/polanon/pull/23).
 
 ## [0.2.0] - 2026-11-03
 

@@ -1,5 +1,7 @@
 """Stage-1 + stage-2 pipeline behaviour. Uses stdlib-only guards so no spaCy model is needed."""
 
+import time
+
 import pytest
 
 from polanon import Anonymizer, DenylistGuard, MockJudge, RegexGuard, SecretsGuard, default_guards
@@ -481,3 +483,41 @@ def test_mask_known_values_never_rewrites_a_token_already_in_the_text():
 def test_mask_known_values_places_the_longest_value_first():
     mapping = {"<OSOBA_1>": "Anna", "<OSOBA_2>": "Anna Wiśniewska"}
     assert mask_known_values("Anna Wiśniewska i Anna", mapping) == "<OSOBA_2> i <OSOBA_1>"
+
+
+def test_a_known_short_number_in_a_long_line_of_numbers_is_masked_in_linear_time():
+    """Each occurrence was checked against the whole run of joined numbers around it."""
+    text = "Lata: " + ",".join(["2025"] * 10_000)
+    assert len(text) > 50_000
+    started = time.perf_counter()
+    result = Anonymizer([]).anonymize_sync(text, {"<SEKRET_1>": "2025"})
+    # A fifth of a second on a laptop and about a second on a CI runner measuring coverage; the
+    # quadratic version took 36 seconds on the same laptop.
+    assert time.perf_counter() - started < 5.0
+    assert result.anonymized == "Lata: " + ",".join(["<SEKRET_1>"] * 10_000)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Umowa na okres 01.01.2025-31.12.2025.",
+        "Rok szkolny 2024/2025.",
+        "Rok szkolny 2025/26.",
+        "Raport 2025-01-01/2025-12-31.",
+        "Pismo z dnia 15.04.2025r.",
+        "Umowę podpisano w 2025r.",
+    ],
+)
+def test_a_known_pin_that_equals_a_year_leaves_dates_joined_to_dates_readable(text):
+    """Two dates joined by "-" or "/" were read as one number, and the PIN in them as a PIN."""
+    first = Anonymizer([SecretsGuard()]).anonymize_sync("Mój PIN do karty: 2025.")
+    assert first.mapping == {"<SEKRET_1>": "2025"}
+    assert Anonymizer([]).anonymize_sync(text, first.mapping).anonymized == text
+
+
+@pytest.mark.parametrize(
+    "text", ["Kody 2025-7319.", "Kody 2025/4821.", "PIN 2025rok.", "PIN 2025R."]
+)
+def test_a_known_pin_joined_to_what_is_no_date_is_still_masked(text):
+    result = Anonymizer([]).anonymize_sync(text, {"<SEKRET_1>": "2025"})
+    assert "2025" not in result.anonymized

@@ -18,6 +18,7 @@ from polanon.guards.recognizers_pl import (
     is_valid_plate,
     is_valid_regon,
     is_valid_vin,
+    profile_handle,
 )
 from polanon.policy import ENTITY_TYPES
 from polanon.types import merge_spans
@@ -154,6 +155,41 @@ def test_address_does_not_swallow_the_postcode_that_follows():
 )
 def test_phone_formats_used_in_poland_are_detected(text):
     assert any(s.entity_type == "PHONE" for s in RegexGuard().detect(text, {"PHONE"}))
+
+
+@pytest.mark.parametrize(
+    ("text", "number"),
+    [
+        ("SMS do 48123456789 nie doszedł", "48123456789"),
+        ("msisdn=48123456789", "48123456789"),
+        ("numer 48 123 456 789", "48 123 456 789"),
+        ("numer 48-123-456-789", "48-123-456-789"),
+        ("numer 48 12 345 67 89", "48 12 345 67 89"),
+        ("+48123456789", "+48123456789"),
+        ("0048123456789", "0048123456789"),
+    ],
+)
+def test_bare_48_country_code_phone_is_masked_in_common_formats(text, number):
+    spans = RegexGuard().detect(text, {"PHONE"})
+    assert [text[s.start : s.end] for s in spans] == [number]
+
+
+def test_valid_pesel_starting_with_48_keeps_its_type():
+    text = "PESEL 48810112344"
+    assert is_valid_pesel("48810112344")
+    spans = merge_spans(RegexGuard().detect(text, ALL), text)
+    assert [(s.entity_type, text[s.start : s.end]) for s in spans] == [("PESEL", "48810112344")]
+
+
+def test_longer_digit_run_starting_with_48_is_not_a_phone():
+    text = "msisdn=481234567890"
+    assert RegexGuard().detect(text, ALL) == []
+
+
+def test_time_prefix_is_not_included_in_a_polish_phone():
+    text = "10:48 600 100 200"
+    spans = RegexGuard().detect(text, {"PHONE"})
+    assert [text[s.start : s.end] for s in spans] == ["600 100 200"]
 
 
 def test_mac_address_is_detected():
@@ -821,3 +857,127 @@ def test_a_card_right_after_a_four_digit_number_is_masked(text):
 def test_a_long_chain_of_four_digit_groups_is_still_not_sliced_into_a_card():
     """Five groups or more are an account or reference number, not a year and a card."""
     assert _found("Ref. 1234 4111 1111 1111 1111 9999", "CREDIT_CARD") == []
+
+
+# --- profile links, written-out e-mails, streets without a prefix and English dates ------------
+
+
+@pytest.mark.parametrize(
+    ("text", "link"),
+    [
+        (
+            "LinkedIn: https://www.linkedin.com/in/jan-kowalski-1a2b3c",
+            "https://www.linkedin.com/in/jan-kowalski-1a2b3c",
+        ),
+        ("linkedin.com/in/jan-kowalski-1a2b3c/", "linkedin.com/in/jan-kowalski-1a2b3c"),
+        ("pl.linkedin.com/in/jan-kowalski", "pl.linkedin.com/in/jan-kowalski"),
+        ("GitHub: github.com/jkowalski.", "github.com/jkowalski"),
+        ("Kod: https://github.com/jkowalski/weather-app", "https://github.com/jkowalski"),
+        ("Portfolio: https://jkowalski.github.io/projekty", "https://jkowalski.github.io"),
+        ("repozytorium jkowalski.github.io", "jkowalski.github.io"),
+        ("gist.github.com/jkowalski/abc", "gist.github.com/jkowalski"),
+        ("https://gitlab.com/jkowalski", "https://gitlab.com/jkowalski"),
+        ("Instagram: instagram.com/jan.kowalski", "instagram.com/jan.kowalski"),
+        ("https://x.com/jkowalski", "https://x.com/jkowalski"),
+        ("https://www.youtube.com/@jankowalski", "https://www.youtube.com/@jankowalski"),
+        ("https://medium.com/@jkowalski/moj-artykul-123", "https://medium.com/@jkowalski"),
+        (
+            "stackoverflow.com/users/123456/jan-kowalski",
+            "stackoverflow.com/users/123456/jan-kowalski",
+        ),
+    ],
+)
+def test_a_link_to_a_profile_is_masked_up_to_its_handle(text, link):
+    """A LinkedIn link carries the name, and a GitHub login reappears in every repository."""
+    assert _found(text, "LINK") == [link]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Zobacz github.com/features oraz https://github.com/topics/python",
+        "Grupa: https://www.facebook.com/groups/12345",
+        "Film: https://www.youtube.com/watch?v=abc123",
+        "Szukaj na https://x.com/search?q=praca",
+        "Aplikuj przez https://kariera.example.pl/oferty/123",
+        "LinkedIn firmy: linkedin.com/company/kodex",
+        "Dokumentacja: https://docs.github.com/en/get-started",
+        "Pisz na jan@github.com",
+    ],
+)
+def test_a_link_that_names_nobody_stays_readable(text):
+    assert _found(text, "LINK") == []
+
+
+@pytest.mark.parametrize(
+    ("link", "handle"),
+    [
+        ("https://github.com/jkowalski/weather-app", "jkowalski"),
+        ("jkowalski.github.io", "jkowalski"),
+        ("https://www.linkedin.com/in/jan-kowalski-1a2b3c/", "jan-kowalski-1a2b3c"),
+        ("https://jankowalski.example", None),
+        ("https://github.com/features", None),
+    ],
+)
+def test_profile_handle_names_the_account_a_link_belongs_to(link, handle):
+    assert profile_handle(link) == handle
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "jan.kowalski [at] example.com",
+        "jan.kowalski(at)example.com",
+        "jan.kowalski (małpa) poczta.example.pl",
+        "jan.kowalski [at] example [dot] com",
+        "JAN.KOWALSKI [AT] EXAMPLE.COM",
+    ],
+)
+def test_an_address_with_its_at_written_out_is_masked_whole(address):
+    """ "jan.kowalski [at] example.com" went out with only "jan" masked, as a first name."""
+    assert _found(f"Pisz: {address}, odpowiem.", "EMAIL") == [address]
+
+
+def test_at_as_an_english_word_is_no_address():
+    assert _found("Meet me at example.com tomorrow", "EMAIL") == []
+
+
+@pytest.mark.parametrize(
+    ("text", "address"),
+    [
+        ("Adres: Długa 5 m. 4, 00-238 Warszawa", "Długa 5 m. 4"),
+        ("Długa 5/12, 00-238 Warszawa", "Długa 5/12"),
+        ("Aleja Róż 3 31-150 Kraków", "Aleja Róż 3"),
+        ("3 Maja 12, 00-001 Warszawa", "3 Maja 12"),
+        ("Jan Kowalski, Kwiatowa 12, 30-001 Kraków", "Kwiatowa 12"),
+    ],
+)
+def test_a_street_without_its_prefix_is_masked_before_a_postcode(text, address):
+    """Only the postcode was masked, and the street in front of it went out."""
+    assert _found(text, "ADDRESS") == [address]
+
+
+@pytest.mark.parametrize(
+    "text", ["Windows 11, Office 365", "NIP 1234567890, 00-950 Warszawa", "Kwiatowa 12 w Krakowie"]
+)
+def test_a_word_and_a_number_with_no_postcode_after_them_are_no_address(text):
+    assert _found(text, "ADDRESS") == []
+
+
+@pytest.mark.parametrize(
+    ("text", "date"),
+    [
+        ("Date of birth: 15 March 1985", "15 March 1985"),
+        ("date of birth: 15 Mar 1985", "15 Mar 1985"),
+        ("DOB: March 15, 1985", "March 15, 1985"),
+        ("Born 3rd May 1985 in Kraków", "3rd May 1985"),
+    ],
+)
+def test_a_birth_date_written_in_english_is_masked(text, date):
+    """A date written in English went out in the clear after "date of birth" or "born"."""
+    assert _found(text, "BIRTH_DATE") == [date]
+
+
+def test_a_date_written_in_english_is_a_date_and_no_birth_date_without_its_label():
+    assert _found("Deadline: 15 June 2025", "DATE") == ["15 June 2025"]
+    assert _found("Deadline: 15 June 2025", "BIRTH_DATE") == []

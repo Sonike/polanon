@@ -9,6 +9,7 @@ from polanon.guards.names_pl import (
     decline_feminine,
     decline_masculine,
     is_common_adjective,
+    person_name_parts,
     surname_reading,
 )
 
@@ -144,6 +145,10 @@ def test_a_surname_after_an_occupation_is_still_addressed():
         "Rechnungsdatum: 15. Mai 2024",
         "Date de facture : 15 mai 2024",
         "Invoice date: Jan 15, 2024",
+        "Invoice date: 15-Jan-2024",
+        "Invoice date: 15/Jan/2024",
+        "Invoice date: 2024-Jan-15",
+        "Rechnungsdatum: 15-Mai-2024",
     ],
 )
 def test_a_month_spelled_like_a_first_name_is_left_alone_in_a_date(text):
@@ -152,6 +157,38 @@ def test_a_month_spelled_like_a_first_name_is_left_alone_in_a_date(text):
 
 def test_a_first_name_after_a_number_is_still_a_name_outside_a_date():
     assert _found("o 15 Jan przyjdzie") == ["Jan"]
+    assert _found("Jan Kowalski przyjdzie") == ["Jan Kowalski"]
+    assert _found("z Janem") == ["Janem"]
+
+
+@pytest.mark.parametrize("separator", ["-", "/", "."])
+@pytest.mark.parametrize(
+    "order", ["15{sep}Jan{sep}2024", "2024{sep}Jan{sep}15", "Jan{sep}15{sep}2024"]
+)
+def test_a_punctuated_date_uses_the_same_separator_on_both_sides(separator, order):
+    assert _found(order.format(sep=separator)) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("Nowak Anna 03/2024", "Nowak Anna"),
+        ("Nowak Anna 12.2024", "Nowak Anna"),
+        ("Sprawa: Nowak Anna 15/2024", "Nowak Anna"),
+        ("15.03.2024 Anna 8 h", "Anna"),
+        ("W 2023 Anna 2 razy była na urlopie.", "Anna"),
+        ("15 Jan/2024", "Jan"),
+        ("15/Jan-2024", "Jan"),
+        ("2024/Jan-15", "Jan"),
+        ("Jan-15/2024", "Jan"),
+        ("2024 Jan 15", "Jan"),
+    ],
+)
+async def test_a_name_next_to_numbers_is_masked_without_spacy(text, name):
+    assert _found(text) == [name]
+    result = await Anonymizer(default_guards(with_ner=False)).anonymize(text)
+    assert result.anonymized == text.replace(name, "<OSOBA_1>")
+    assert result.mapping == {"<OSOBA_1>": name}
 
 
 def test_a_word_that_is_also_a_name_needs_a_surname_or_a_form_of_address():
@@ -371,3 +408,48 @@ def test_a_noun_in_ka_after_pana_is_not_a_surname(text):
 )
 def test_a_lowercase_ek_surname_after_a_form_of_address_is_still_masked(text, expected):
     assert _found(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Oliwier Nowak", ["Oliwier Nowak"]),
+        ("Praktyki u Oliwiera Nowaka", ["Oliwiera Nowaka"]),
+        ("Opiekunka: Ksenia Lis-Kowalska", ["Ksenia Lis-Kowalska"]),
+        ("Matylda Nowak", ["Matylda Nowak"]),
+        ("rozmowa z Maurycym Kowalskim", ["Maurycym Kowalskim"]),
+        ("Celina Zając", ["Celina Zając"]),
+        ("Melania Kot", ["Melania Kot"]),
+        ("Otylia Wiśniewska", ["Otylia Wiśniewska"]),
+        ("Cyprian Lis", ["Cyprian Lis"]),
+        ("Lilianna Kowalczyk", ["Lilianna Kowalczyk"]),
+    ],
+)
+def test_popular_first_names_missing_from_the_list_are_known(text, expected):
+    """Oliwier, Ksenia and Matylda are common names, and "Oliwier Nowak" went out whole."""
+    assert _found(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "parts"),
+    [
+        ("Jan Kowalski", ["Kowalski"]),
+        ("JAN KOWALSKI", ["KOWALSKI"]),
+        ("Kowalski Jan", ["Kowalski"]),
+        ("Jana Kowalskiego", ["Kowalskiego"]),
+        ("dr Jan Kowalski", ["Kowalski"]),
+        ("Dyrektor Jan Kowalski", ["Kowalski"]),
+        ("Anna Nowak-Kępa", ["Nowak-Kępa", "Nowak", "Kępa"]),
+        ("Anna-Maria Nowak", ["Nowak"]),
+        ("Jan", []),
+    ],
+)
+def test_the_parts_of_a_name_that_point_to_the_person_are_its_surname(name, parts):
+    assert person_name_parts(name) == parts
+
+
+def test_a_name_with_no_known_first_name_gives_its_parts_only_when_trusted():
+    """A model that reads "Politechnika Krakowska" as a person must not mask "Politechnika"."""
+    assert person_name_parts("Politechnika Krakowska") == ["Politechnika"]
+    assert person_name_parts("Politechnika Krakowska", needs_first_name=True) == []
+    assert person_name_parts("Jan Kowalski", needs_first_name=True) == ["Kowalski"]
