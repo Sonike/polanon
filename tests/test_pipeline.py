@@ -107,6 +107,33 @@ async def test_token_reservations_are_limited_by_digit_count(number, next_number
     assert Anonymizer.restore(result.anonymized, result.mapping) == text
 
 
+async def test_allocation_skips_literal_tokens_beyond_six_digits():
+    text = "<EMAIL_999999> i <EMAIL_1000000> oraz a@b.example"
+    result = await run(text, enabled={"EMAIL"})
+
+    assert result.anonymized == "<EMAIL_999999> i <EMAIL_1000000> oraz <EMAIL_1000001>"
+    assert result.mapping["<EMAIL_1000000>"] == "<EMAIL_1000000>"
+    assert result.mapping["<EMAIL_1000001>"] == "a@b.example"
+    assert Anonymizer.restore(result.anonymized, result.mapping) == text
+
+
+def test_allocation_keeps_seven_digit_tokens_stable_across_turns():
+    anonymizer = Anonymizer(default_guards(with_ner=False))
+    first_text = "Pole <OSOBA_999999> wypełnia Jan Kowalski."
+    second_text = "Umowę podpisała Anna Nowak."
+    first = anonymizer.anonymize_sync(first_text)
+    second = anonymizer.anonymize_sync(second_text, mapping=first.mapping)
+
+    assert first.anonymized == "Pole <OSOBA_999999> wypełnia <OSOBA_1000000>."
+    assert second.anonymized == "Umowę podpisała <OSOBA_1000001>."
+    assert second.mapping["<OSOBA_1000000>"] == "Jan Kowalski"
+    assert second.mapping["<OSOBA_1000001>"] == "Anna Nowak"
+    assert Anonymizer.restore(first.anonymized, second.mapping) == first_text
+    assert Anonymizer.restore(second.anonymized, second.mapping) == second_text
+    # Known values stay masked even when no guard detects them in a later turn.
+    assert mask_known_values("Jan Kowalski", second.mapping) == "<OSOBA_1000000>"
+
+
 async def test_disabled_entity_types_are_not_masked():
     result = await run("PESEL 50810112354 i mail a@b.example", enabled={"EMAIL"})
     assert result.anonymized == "PESEL 50810112354 i mail <EMAIL_1>"

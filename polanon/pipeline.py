@@ -47,7 +47,8 @@ class _TokenAllocator:
     Token-shaped text the caller wrote is never handed out again, so a template's literal
     "<PESEL_1>" cannot collide with a real PESEL and turn into it on restore. Such a token joins the
     mapping as standing for itself, which carries the reservation into the next turn with the
-    mapping the caller already passes along.
+    mapping the caller already passes along. Numbers longer than six digits do not advance the
+    counter, but allocation still skips every token already present in the mapping.
     """
 
     def __init__(self, existing_mapping: dict[str, str], reserved: Iterable[str] = ()) -> None:
@@ -67,7 +68,11 @@ class _TokenAllocator:
             self._mapping.setdefault(token, token)
 
     def _reserve(self, token: str) -> None:
-        """Keep new tokens from reusing the number of `token`."""
+        """Advance the counter for token numbers of at most six digits.
+
+        Longer numbers are not reserved in the counter; allocate still never reuses a token
+        already present in the mapping.
+        """
         match = TOKEN_RE.fullmatch(token)
         # Long input numbers may be identifiers, and int() rejects very long digit strings.
         if match is not None and len(match.group("n")) <= 6:
@@ -87,8 +92,11 @@ class _TokenAllocator:
                 return known
         label = ENTITY_TYPES.get(entity_type, entity_type)
         number = self._counters.get(label, 0) + 1
-        self._counters[label] = number
         token = token_for(entity_type, number)
+        while token in self._mapping:
+            number += 1
+            token = token_for(entity_type, number)
+        self._counters[label] = number
         for key in keys:
             self._by_value.setdefault(key, token)
         self._mapping[token] = value
