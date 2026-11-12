@@ -46,7 +46,7 @@ _DATE_TIME_OR_AMOUNT = re.compile(
     r"\d{1,2}[./-]\d{1,2}[./-](?:\d{2}|(?:19|20)\d{2})"
     r"|(?:19|20)\d{2}[./-]\d{1,2}(?:[./-]\d{1,2})?"
     r"|\d{1,2}[./-](?:19|20)\d{2}"
-    r"|(?:19|20)\d{2}-(?:19|20)?\d{2}"
+    r"|(?:19|20)\d{2}[-/](?:19|20)?\d{2}"
     r"|\d{1,2}:\d{2}(?::\d{2})?"
     r"|\d+[.,]\d{1,2}"
     r"|\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?"
@@ -103,6 +103,20 @@ _GROUP_SEPARATOR = re.compile(r"(?<=[^\W_])[ -]+(?=[^\W_])")
 _FOLD_FIX = str.maketrans({chr(0x03C2): chr(0x03C3), chr(0x0131): "i"})
 
 _PLAIN_DASHES = str.maketrans(dict.fromkeys(DASHES, "-"))
+
+#: Longer than any date, time or amount the check around a short number reads, as written with
+#: its joiners: "1.234.567.890,12" is 16 characters.
+_LONGEST_SHAPE = 20
+
+#: Joiners that may stand between two dates, two years or two amounts as well as inside one.
+_BETWEEN_TWO = "-/"
+
+#: A year with the abbreviation of "rok" glued on: "15.04.2025r.", "w 2025r".
+_YEAR_WITH_R = re.compile(r"(?:19|20)\d{2}r(?!\w)")
+
+#: Digits and the joiners between them, after a short number and before it.
+_JOINED = re.compile(rf"[\d{re.escape(NUMBER_JOINERS)}]*")
+_JOINED_BEFORE = re.compile(rf"[\d{re.escape(NUMBER_JOINERS)}]*\Z")
 
 
 def type_of(token: str) -> str | None:
@@ -185,14 +199,16 @@ class Ranges:
 
     def only_inside(self, start: int, end: int) -> bool:
         """Return whether every stored range the range touches lies inside it and is shorter."""
+        return all(
+            start <= first and last <= end and (first, last) != (start, end)
+            for first, last in self.touching(start, end)
+        )
+
+    def touching(self, start: int, end: int) -> list[tuple[int, int]]:
+        """Return the stored ranges the range from `start` to `end` overlaps, in order."""
         first = bisect_right(self._ends, start)
         last = bisect_left(self._starts, end)
-        return all(
-            start <= self._starts[i]
-            and self._ends[i] <= end
-            and (self._starts[i], self._ends[i]) != (start, end)
-            for i in range(first, last)
-        )
+        return [(self._starts[i], self._ends[i]) for i in range(first, last)]
 
     def add(self, start: int, end: int) -> None:
         """Store a range that overlaps none of the stored ones."""
@@ -449,6 +465,20 @@ def known_value_ranges(
     return ranges
 
 
+@dataclass(frozen=True)
+class Placement:
+    """What the occurrences of known values mask, as ``(start, end, payload)`` in the text.
+
+    `matches` never overlap each other or the ranges the search had to step around. `crossing`
+    holds the occurrences that run past such a range with a letter or digit of their own: masking
+    only the matches would send that part in the clear, so the caller resolves each one with the
+    range it crosses, as :func:`~polanon.types.merge_spans` does.
+    """
+
+    matches: list[tuple[int, int, str]]
+    crossing: list[tuple[int, int, str]]
+
+
 def known_value_matches(
     text: str,
     haystack: Haystack,
@@ -458,6 +488,22 @@ def known_value_matches(
     absorb: bool = False,
 ) -> list[tuple[int, int, str]]:
     """Find every occurrence of a known value, as ``(start, end, payload)`` in `text`.
+
+    The matches of :func:`place_known_values`, for a caller that cannot resolve an overlap.
+    """
+    return place_known_values(text, haystack, values, occupied, absorb=absorb).matches
+
+
+def place_known_values(
+    text: str,
+    haystack: Haystack,
+    values: Iterable[tuple[str, str]],
+    occupied: Iterable[tuple[int, int]],
+    *,
+    absorb: bool = False,
+    cross_occupied: bool = False,
+) -> Placement:
+    """Find every occurrence of a known value, and the ones that cross another range.
 
     The entity filter is deliberately not applied here. A value the conversation already treats as
     sensitive keeps being masked after the enabled types are narrowed; otherwise a later turn that
@@ -473,10 +519,15 @@ def known_value_matches(
     written exactly. Ranges in `occupied` are never cut into. With `absorb`, an occurrence of the
     value itself may cover ranges of `occupied` whole, as "Jan" + line break + "Kowalski" covers a
     guard's "Jan": the caller drops what it covers and masks the occurrence instead.
+
+    An occurrence that only partly overlaps an occurrence placed before it is returned in
+    `crossing`, and with `cross_occupied` so is one that partly overlaps a range of `occupied`,
+    such as a guard's detection the caller can still merge with it. Without it, a range of
+    `occupied` is a token that must stay whole, and an occurrence crossing it is left out.
     """
     found = needles(values)
     where = _find(text, haystack, found)
-    placer = _Placer(Ranges(occupied), absorb=absorb)
+    placer = _Placer(Ranges(occupied), text, absorb=absorb, cross_occupied=cross_occupied)
 
     def as_written(start: int, end: int) -> tuple[int, int]:
         return start, end
@@ -498,17 +549,22 @@ def known_value_matches(
             first, end = haystack.regrouped(start, start + length)
             if _stands_alone(haystack.text, first, end):
                 placer.place(haystack.text, first, end, needle, haystack.to_original)
-    return placer.matches
+    return Placement(placer.matches, placer.crossing)
 
 
 class _Placer:
     """Decides what each occurrence masks, keeping the ranges placed so far."""
 
-    def __init__(self, guarded: Ranges, *, absorb: bool) -> None:
+    def __init__(
+        self, guarded: Ranges, original: str, *, absorb: bool, cross_occupied: bool
+    ) -> None:
         self.placed = Ranges()
         self.guarded = guarded
+        self.original = original
         self.absorb = absorb
+        self.cross_occupied = cross_occupied
         self.matches: list[tuple[int, int, str]] = []
+        self.crossing: list[tuple[int, int, str]] = []
         #: The last word that could not be masked whole, and the text it is a word of. Later
         #: occurrences inside it go straight to the value alone: widening each of them again
         #: rescanned the whole word every time.
@@ -540,6 +596,8 @@ class _Placer:
         # letters and digits each occurrence would otherwise rescan the whole run.
         bare = to_original(start, end)
         if self.blocked(*bare):
+            if self._runs_past(*bare) and _occurrence(text, start, end, needle, through_view):
+                self.crossing.append((*bare, needle.payload))
             return
         kind = _occurrence(text, start, end, needle, through_view)
         if kind is None:
@@ -552,6 +610,23 @@ class _Placer:
                 return
             self._blocked_word = (text, *word)
         self._accept(bare, needle.payload)
+
+    def _runs_past(self, start: int, end: int) -> bool:
+        """Return whether a blocked occurrence has a letter or digit outside what blocks it.
+
+        "Nowak z Kowalskich" known from an earlier turn meets a guard's "Anna Nowak": skipping the
+        occurrence sent "z Kowalskich" in the clear. An occurrence that crosses a range of
+        `guarded` counts only with `cross_occupied`, since otherwise that range is a token.
+        """
+        guarded = self.guarded.touching(start, end)
+        if guarded and not self.cross_occupied:
+            return False
+        cursor = start
+        for first, last in sorted(self.placed.touching(start, end) + guarded):
+            if first > cursor and _has_word_character(self.original[cursor:first]):
+                return True
+            cursor = max(cursor, last)
+        return cursor < end and _has_word_character(self.original[cursor:end])
 
     def _inside_blocked_word(self, text: str, start: int, end: int) -> bool:
         word = self._blocked_word
@@ -572,7 +647,9 @@ def _occurrence(text: str, start: int, end: int, needle: Needle, through_view: b
         return "alone"
     if len(needle.read) < MIN_EMBEDDED_LENGTH:
         return None
-    if needle.is_short_number and _next_to_a_digit(text, start, end):
+    if needle.is_short_number and (
+        _next_to_a_digit(text, start, end) or _a_year_with_r(text, start, end)
+    ):
         return None
     return "inside a word"
 
@@ -580,6 +657,10 @@ def _occurrence(text: str, start: int, end: int, needle: Needle, through_view: b
 def _is_word_character(char: str) -> bool:
     """Letters and digits, the combining marks of decomposed text, and invisible characters."""
     return char.isalnum() or unicodedata.combining(char) > 0 or char in INVISIBLE
+
+
+def _has_word_character(text: str) -> bool:
+    return any(_is_word_character(char) for char in text)
 
 
 def _stands_alone(text: str, start: int, end: int) -> bool:
@@ -609,16 +690,45 @@ def _whole_words(text: str, start: int, end: int) -> tuple[int, int]:
     return start, end
 
 
+def _a_year_with_r(text: str, start: int, end: int) -> bool:
+    """Return whether `start`..`end` is a year followed by a glued "r", as in "15.04.2025r."."""
+    year = _YEAR_WITH_R.match(text, start)
+    return year is not None and year.end() == end + 1
+
+
 def _next_to_a_digit(text: str, start: int, end: int) -> bool:
     return (start > 0 and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit())
 
 
 def _in_a_date_time_or_amount(text: str, start: int, end: int) -> bool:
-    """Return whether digits at `start`..`end` are part of a date, a time or an amount."""
-    first, last = start, end
-    while first > 0 and (text[first - 1].isdigit() or text[first - 1] in NUMBER_JOINERS):
-        first -= 1
-    while last < len(text) and (text[last].isdigit() or text[last] in NUMBER_JOINERS):
-        last += 1
-    run = text[first:last].translate(_PLAIN_DASHES).strip(".,-/:")
-    return run != text[start:end] and _DATE_TIME_OR_AMOUNT.fullmatch(run) is not None
+    """Return whether digits at `start`..`end` are part of a date, a time or an amount.
+
+    Only :data:`_LONGEST_SHAPE` characters on either side are looked at, which is more than any
+    date, time or amount takes. Scanning the whole run of joined numbers for every occurrence made
+    masking quadratic on one long line of numbers: 50 KB of a known PIN took most of a minute.
+    """
+    before = _JOINED_BEFORE.search(text, max(0, start - _LONGEST_SHAPE), start)
+    after = _JOINED.match(text, end, min(len(text), end + _LONGEST_SHAPE))
+    first = before.start() if before is not None else start
+    last = after.end() if after is not None else end
+    # A run cut off by the limit starts and ends at a joiner, so no number is read halfway.
+    if first > 0 and _in_a_number(text[first - 1]):
+        first = next((i + 1 for i in range(first, start) if text[i] in NUMBER_JOINERS), start)
+    if last < len(text) and _in_a_number(text[last]):
+        last = next((i for i in range(last - 1, end - 1, -1) if text[i] in NUMBER_JOINERS), end)
+    # "-" and "/" also stand between two dates or amounts, as in "01.01.2025-31.12.2025", so
+    # every stretch of the run between them that holds the number is read on its own.
+    run = text[first:last].translate(_PLAIN_DASHES)
+    number = text[start:end]
+    lefts = [0, *(i + 1 for i in range(start - first) if run[i] in _BETWEEN_TWO)]
+    rights = [len(run), *(i for i in range(end - first, len(run)) if run[i] in _BETWEEN_TWO)]
+    for left in lefts:
+        for right in rights:
+            piece = run[left:right].strip(".,-/:")
+            if piece != number and _DATE_TIME_OR_AMOUNT.fullmatch(piece) is not None:
+                return True
+    return False
+
+
+def _in_a_number(char: str) -> bool:
+    return char.isdigit() or char in NUMBER_JOINERS

@@ -17,12 +17,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from polanon._detection import detect
+from polanon._known_parts import known_parts
 from polanon._matching import (
     TOKEN_RE,
     Haystack,
     Ranges,
     folds,
     known_value_matches,
+    place_known_values,
     type_of,
     value_keys,
 )
@@ -261,6 +263,20 @@ def _count(counts: dict[str, int], token: str) -> None:
     counts[entity_type] = counts.get(entity_type, 0) + 1
 
 
+#: Detections at or above this confidence come from a rule, a list or the caller, never from a
+#: language model (0.85) or the judge (0.5), so the parts of their values are trusted as well.
+_TRUSTED_SCORE = 0.9
+
+
+def _remember(
+    known: dict[tuple[str, bool], tuple[str, str]], value: str, entity_type: str, *, trusted: bool
+) -> None:
+    """Add a value to the known values, with the parts of it that identify on their own."""
+    known.setdefault((value.strip(), folds(entity_type)), (value, entity_type))
+    for part in known_parts(value, entity_type, trusted=trusted):
+        known.setdefault((part, folds(entity_type)), (part, entity_type))
+
+
 def _mask_stage1(
     text: str,
     detected: list[Span],
@@ -276,7 +292,12 @@ def _mask_stage1(
 
     An occurrence of a known value takes in what a guard found inside it: a signature that puts
     "Jan" and "Kowalski" on two lines is read as "Jan" by the name rule, and masking that alone
-    sent the surname. Such detections give way to the occurrence, which is masked whole.
+    sent the surname. Such detections give way to the occurrence, which is masked whole. One that
+    only partly overlaps a detection, or another known value, is resolved with it as two
+    detections are, so no letter of either reaches the model.
+
+    The parts of a value that point to the same thing on their own are known values too: the
+    surname of a person, the handle in a link to a profile. See :mod:`polanon._known_parts`.
     """
     if allowlist is not None:
         detected = allowlist.drop_allowed(detected, text)
@@ -288,17 +309,21 @@ def _mask_stage1(
     for token, value in existing_mapping.items():
         entity_type = type_of(token)
         if entity_type is not None and value != token:
-            known.setdefault((value.strip(), folds(entity_type)), (value, entity_type))
+            _remember(known, value, entity_type, trusted=False)
     for span in merged:
         if (span.start, span.end) in whole:
             value = text[span.start : span.end]
-            known.setdefault((value.strip(), folds(span.entity_type)), (value, span.entity_type))
+            _remember(known, value, span.entity_type, trusted=span.score >= _TRUSTED_SCORE)
     occupied = [(span.start, span.end) for span in merged]
-    found = known_value_matches(text, haystack, known.values(), occupied, absorb=True)
-    covered = Ranges((start, end) for start, end, _ in found)
+    placement = place_known_values(
+        text, haystack, known.values(), occupied, absorb=True, cross_occupied=True
+    )
+    covered = Ranges((start, end) for start, end, _ in placement.matches)
     kept = [span for span in merged if not covered.overlaps(span.start, span.end)]
+    occurrences = placement.matches + placement.crossing
     spans = merge_spans(
-        kept + [Span(start, end, kind, 0.9, "known_value") for start, end, kind in found], text
+        kept + [Span(start, end, kind, 0.9, "known_value") for start, end, kind in occurrences],
+        text,
     )
 
     reserved = (match.group(0) for match in TOKEN_RE.finditer(text))
@@ -331,6 +356,10 @@ def _apply_findings(
     nothing inside an existing token is touched. All findings are applied in one pass, a token is
     allocated only for what is actually replaced, and every replacement is recorded in original
     coordinates, so `spans` describes exactly what the anonymized text hides.
+
+    Small models often quote overlapping pieces of one name. Findings that overlap are resolved as
+    two detections are, by :func:`~polanon.types.merge_spans`: masking only the longer one sent the
+    first name of "Ngozi Okonkwo-Brzęczyszczykiewicz z kancelarii ..." in the clear.
     """
     wanted = [
         (finding.text.strip(), finding.entity_type)
@@ -342,20 +371,25 @@ def _apply_findings(
     ]
     masked = masking.masked
     haystack = Haystack.of(masked, detection_view(masked))
-    matches = sorted(known_value_matches(masked, haystack, wanted, _token_ranges(masked)))
+    placement = place_known_values(masked, haystack, wanted, _token_ranges(masked))
+    found = [
+        Span(start, end, entity_type, 0.5, "judge")
+        for start, end, entity_type in placement.matches + placement.crossing
+    ]
+    replaced = merge_spans(found, masked)
     parts: list[str] = []
     cursor = 0
-    for start, end, entity_type in matches:
-        token = masking.allocator.allocate(masked[start:end], entity_type)
-        parts.append(masked[cursor:start])
+    for span in replaced:
+        token = masking.allocator.allocate(masked[span.start : span.end], span.entity_type)
+        parts.append(masked[cursor : span.start])
         parts.append(token)
-        cursor = end
+        cursor = span.end
         _count(masking.entity_counts, token)
-        original_start, original_end = masking.to_original(start, end)
-        masking.spans.append(Span(original_start, original_end, entity_type, 0.5, "judge"))
+        original_start, original_end = masking.to_original(span.start, span.end)
+        masking.spans.append(Span(original_start, original_end, span.entity_type, 0.5, "judge"))
     parts.append(masked[cursor:])
     masking.masked = "".join(parts)
-    masking.judge_hits += len(matches)
+    masking.judge_hits += len(replaced)
 
 
 async def anonymize(

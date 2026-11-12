@@ -15,6 +15,11 @@ Public API (stable):
     Anonymizer.restore("Dzień dobry <OSOBA_1>", result.mapping)   # original back in the answer
     restorer = Anonymizer.stream_restorer(result.mapping)         # for token-by-token streams
 
+    turn = anonymizer.turn(known=["Klub Orlik"])   # one call: history, question, tool results
+    messages = turn.mask_messages(history)         # Anthropic or OpenAI messages, one mapping
+    turn.mask_data(tool_result)                    # MaskingUnavailableError: send nothing
+    turn.restore_data(tool_input), turn.restore(answer), turn.stream_restorer()
+
 Runtime dependencies of the core: the standard library only. `NerGuard` needs spaCy and a language
 model, the remote judges need httpx, and both are imported lazily so neither is required to mask
 identifiers.
@@ -40,7 +45,15 @@ from polanon.output_sweep import SweepReport, sweep
 from polanon.pipeline import _anonymize_stage1, anonymize, mask_known_values
 from polanon.policy import ENTITY_TYPES, TOKEN_PATTERN, token_for
 from polanon.stream_restore import StreamRestorer
-from polanon.types import AnonymizationResult, JudgeFallback, Span, merge_spans
+from polanon.turn import MaskedTurn, UnknownBlocks, token_instructions
+from polanon.types import (
+    AnonymizationResult,
+    JudgeFallback,
+    MaskingUnavailableError,
+    NerModelUnavailableError,
+    Span,
+    merge_spans,
+)
 
 __all__ = [
     "DEFAULT_ENABLED",
@@ -58,7 +71,10 @@ __all__ = [
     "JudgeError",
     "JudgeFallback",
     "JudgeFinding",
+    "MaskedTurn",
+    "MaskingUnavailableError",
     "MockJudge",
+    "NerModelUnavailableError",
     "PersonNameGuard",
     "RegexGuard",
     "SecretsGuard",
@@ -68,11 +84,13 @@ __all__ = [
     "default_guards",
     "mask_known_values",
     "merge_spans",
+    "ner_available",
     "sweep",
     "token_for",
+    "token_instructions",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.1"
 
 #: The entity types an Anonymizer masks unless told otherwise: every built-in type except DATE.
 #: A date rarely identifies anyone on its own, and masking every deadline and invoice date leaves
@@ -103,8 +121,10 @@ def default_guards(
 
     Raises:
         TypeError: when `denylist` is a single string, which would be read letter by letter.
-        ModuleNotFoundError: when `with_ner` is on and spaCy or the model is not installed. It is
-            raised here rather than on the first text to mask, with the command that fixes it.
+        NerModelUnavailableError: when `with_ner` is on and spaCy or the model is not installed.
+            It is raised here rather than on the first text to mask, with the command that fixes
+            it, and it is both a ModuleNotFoundError and a MaskingUnavailableError.
+            Also raised for a model directory without `meta.json` or `config.cfg`.
     """
     if isinstance(denylist, str):
         # The term itself stays out of the message: it is what the caller wants kept hidden.
@@ -118,7 +138,10 @@ def default_guards(
         DenylistGuard(list(denylist)),
     ]
     if with_ner:
-        _require_spacy(spacy_model)
+        try:
+            _require_spacy(spacy_model)
+        except ModuleNotFoundError as exc:
+            raise NerModelUnavailableError(str(exc)) from None
         from polanon.guards.ner import NerGuard
 
         guards.append(NerGuard(spacy_model=spacy_model))
@@ -142,6 +165,22 @@ def _require_spacy(spacy_model: str) -> None:
             raise ModuleNotFoundError(f"no spaCy model at {model}")
     elif importlib.util.find_spec(model) is None:
         raise ModuleNotFoundError(f"the spaCy model {model!r} is not installed: {hint}")
+
+
+def ner_available(spacy_model: str = "pl_core_news_md") -> bool:
+    """Return whether ``default_guards(with_ner=True)`` would find spaCy and the model.
+
+    It runs the same check as :func:`default_guards` without loading anything, so a settings page
+    can show whether the language model can be switched on.
+
+    Args:
+        spacy_model: the spaCy model the guard would load.
+    """
+    try:
+        _require_spacy(spacy_model)
+    except ModuleNotFoundError:
+        return False
+    return True
 
 
 class Anonymizer:
@@ -265,3 +304,21 @@ class Anonymizer:
     def sweep(self, restored_text: str, mapping: dict[str, str]) -> SweepReport:
         """Check a restored answer for invented tokens and unexpected personal data."""
         return sweep(restored_text, mapping, self.guards, self.enabled, self.allowlist)
+
+    def turn(
+        self,
+        *,
+        known: Iterable[str] = (),
+        mapping: dict[str, str] | None = None,
+        unknown_blocks: UnknownBlocks = "raise",
+    ) -> MaskedTurn:
+        """Start masking one call to a model: its history, question and tool results.
+
+        ``anonymizer.turn(...)`` is ``MaskedTurn(anonymizer, ...)``; see :class:`MaskedTurn`.
+
+        Args:
+            known: values already known to be sensitive, masked wherever they appear.
+            mapping: token -> original value from earlier turns of the same conversation.
+            unknown_blocks: ``"raise"`` or ``"drop"`` a message block that cannot be masked.
+        """
+        return MaskedTurn(self, known=known, mapping=mapping, unknown_blocks=unknown_blocks)

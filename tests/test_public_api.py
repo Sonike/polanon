@@ -14,8 +14,11 @@ from polanon import (
     Allowlist,
     Anonymizer,
     JudgeError,
+    MaskingUnavailableError,
+    NerModelUnavailableError,
     RegexGuard,
     default_guards,
+    ner_available,
 )
 from polanon.guards.base import Guard
 from polanon.judge.mock import MockJudge
@@ -126,6 +129,29 @@ def test_a_model_package_is_checked_and_loaded_by_its_import_name(monkeypatch, m
     guards = default_guards(spacy_model=model)
     load.assert_not_called()
     assert "<PESEL_1>" in Anonymizer(guards).anonymize_sync(TEXT).anonymized
+    load.assert_called_once_with("pl_core_news_md", exclude=["lemmatizer", "tagger"])
+
+
+@pytest.mark.parametrize("local_kind", ["directory", "file"])
+@pytest.mark.parametrize("model", [None, "pl-core-news-md"])
+def test_an_installed_model_takes_priority_over_a_same_named_path(
+    monkeypatch, tmp_path, local_kind, model
+):
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / (model or "pl_core_news_md")
+    if local_kind == "directory":
+        path.mkdir()
+    else:
+        path.write_text("not a model", encoding="utf-8")
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: object() if name in {"spacy", "pl_core_news_md"} else None,
+    )
+    load = Mock(return_value=lambda text: SimpleNamespace(ents=[]))
+    monkeypatch.setitem(sys.modules, "spacy", SimpleNamespace(load=load))
+    guards = default_guards() if model is None else default_guards(spacy_model=model)
+    load.assert_not_called()
+    Anonymizer(guards).anonymize_sync(TEXT)
     load.assert_called_once_with("pl_core_news_md", exclude=["lemmatizer", "tagger"])
 
 
@@ -250,3 +276,27 @@ def test_a_returned_type_spelled_like_a_built_in_label_is_refused():
 def test_a_declared_type_that_cannot_label_a_token_is_refused():
     with pytest.raises(ValueError, match="uppercase letters and underscores"):
         Anonymizer([LabelGuard("Employee_Id")])
+
+
+@pytest.mark.parametrize("found", [set(), {"spacy"}], ids=["without spaCy", "without the model"])
+def test_a_missing_language_model_is_also_masking_unavailable(monkeypatch, found):
+    """An app that refuses to send unmasked text catches one error, whatever is missing."""
+    monkeypatch.setattr(
+        "importlib.util.find_spec", lambda name: object() if name in found else None
+    )
+    with pytest.raises(MaskingUnavailableError) as error:
+        default_guards()
+    assert isinstance(error.value, NerModelUnavailableError)
+    assert isinstance(error.value, ModuleNotFoundError)
+    assert "with_ner=False" in str(error.value)
+
+
+def test_the_language_model_is_reported_available_only_when_it_is_installed(monkeypatch):
+    installed = {"spacy", "pl_core_news_md"}
+    monkeypatch.setattr(
+        "importlib.util.find_spec", lambda name: object() if name in installed else None
+    )
+    assert ner_available()
+    assert not ner_available("pl_core_news_lg")
+    installed.discard("spacy")
+    assert not ner_available()

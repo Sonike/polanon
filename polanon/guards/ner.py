@@ -7,6 +7,7 @@ so it silently returns nothing. Talking to spaCy ourselves keeps the mapping exp
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import re
 import threading
@@ -372,7 +373,9 @@ def _model_reference(spacy_model: str) -> str | Path:
     """Normalize a package's pip spelling without rewriting a model directory's name."""
     package = spacy_model.replace("-", "_")
     path = Path(spacy_model)
-    if package.isidentifier() and not path.exists():
+    if package.isidentifier() and (
+        importlib.util.find_spec(package) is not None or not path.exists()
+    ):
         return package
     return path
 

@@ -12,6 +12,12 @@ from itertools import takewhile
 from polanon.guards.base import Guard
 from polanon.types import Span
 
+
+def _words(block: str) -> list[str]:
+    """Split a whitespace-separated block, which keeps long word lists readable."""
+    return block.split()
+
+
 # ---------- validators ----------
 
 
@@ -184,6 +190,66 @@ ADDRESS_PATTERN = re.compile(
     rf"(?:\s+(?:{_NAME_PART}|{_TITLE}|i|w|na|pod|im\.))*\s+{_HOUSE}"
 )
 
+#: A street written without its prefix, as forms and CVs often do: "Długa 5 m. 4, 00-238
+#: Warszawa". The postcode right after it is what makes it an address; without one, a capitalised
+#: word and a number are a product and its version ("Windows 11") far more often than a street. The
+#: numbers are short, so "NIP 1234567890, 00-950" is not read as a street.
+ADDRESS_BEFORE_POSTCODE_PATTERN = re.compile(
+    rf"(?<![\w.]){_NAME_PART}(?:[ \t]+(?:{_NAME_PART}|{_TITLE}|i|w|na|pod|im\.))*[ \t]+"
+    r"\d{1,4}[A-Za-z]?(?:[ \t]*/[ \t]*\d{1,4}[A-Za-z]?)?"
+    r"(?:[ \t]*(?:m|lok(?:al)?)\.?[ \t]*\d{1,4}[A-Za-z]?)?(?!\d)"
+    r"(?=[ \t]*,?[ \t]*\d{2}-\d{3}\b)"
+)
+
+_POLISH_LETTERS = "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"
+_EMAIL_LOCAL = rf"A-Za-z0-9._%+\-{_POLISH_LETTERS}"
+_EMAIL_LABEL = rf"[A-Za-z0-9\-{_POLISH_LETTERS}]+"
+_EMAIL_AT = r"\s*[\[({]\s*(?i:at|małpa|malpa)\s*[\])}]\s*"
+_EMAIL_DOT = r"(?:\.|\s*[\[({]\s*(?i:dot|kropka)\s*[\])}]\s*)"
+
+#: An e-mail address with its "@" written out in brackets, and optionally its dots too.
+OBFUSCATED_EMAIL_PATTERN = re.compile(
+    rf"(?<![{_EMAIL_LOCAL}])[{_EMAIL_LOCAL}]+{_EMAIL_AT}"
+    rf"{_EMAIL_LABEL}(?:{_EMAIL_DOT}{_EMAIL_LABEL})*{_EMAIL_DOT}[A-Za-z{_POLISH_LETTERS}]{{2,}}"
+)
+
+#: Sites whose path starts with the handle of the person or the organisation the page belongs to.
+_HANDLE_SITES = (
+    r"github\.com|gitlab\.com|bitbucket\.org|codeberg\.org|behance\.net|dribbble\.com|kaggle\.com"
+    r"|codepen\.io|dev\.to|huggingface\.co|instagram\.com|facebook\.com|fb\.com|twitter\.com"
+    r"|x\.com|threads\.net|medium\.com|tiktok\.com|youtube\.com(?:/(?:c|user|channel))?"
+)
+#: A handle as it stands in a path. A full stop ends it unless more of the handle follows, so the
+#: one that closes a sentence is left out.
+_HANDLE = r"[\w%-]+(?:\.[\w%-]+)*"
+
+#: A link to a person's page: a LinkedIn profile, a GitHub or GitLab account and anything under it,
+#: a portfolio on GitHub Pages, a social media profile. The match ends with the handle.
+PROFILE_LINK_PATTERN = re.compile(
+    r"(?<![\w@./-])(?i:(?:https?://)?(?:"
+    r"(?:(?:www|m|mobile|gist|[a-z]{2})\.)?"
+    rf"(?:linkedin\.com/(?:in|pub)/|stackoverflow\.com/users/\d+/|leetcode\.com/u/"
+    rf"|(?:{_HANDLE_SITES})/@?)(?P<handle>{_HANDLE})"
+    r"|(?P<page>[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.(?:github|gitlab)\.io(?![\w-])))"
+)
+
+#: Paths on those sites that are the site's own pages rather than somebody's: github.com/features,
+#: facebook.com/groups, youtube.com/watch, x.com/search.
+_SITE_PAGES = frozenset(
+    _words(
+        """
+        about accounts apps blog business challenges code codespaces collections competitions
+        compose contact copilot customer-stories dashboard datasets designers discussions docs
+        embed enterprise events explore features feed gaming groups hashtag help home i in intent
+        issues jobs join learn login marketplace messages models new notifications organizations
+        orgs p pages papers pen permalink.php photo photo.php playlist policies pricing profile.php
+        projects pulls readme reel reels results search security settings share sharer sharer.php
+        shorts shots signup site spaces sponsors stories story.php tag tags team topic topics
+        trending tv users watch
+        """
+    )
+)
+
 #: An IPv6 address in any of its written forms, including the "::" abbreviation and the
 #: IPv4-mapped tail. Validation is left to :func:`is_valid_ipv6`, which simply asks the standard
 #: library, so the pattern only has to be generous enough to find candidates.
@@ -198,11 +264,21 @@ _MONTHS = (
     "wrzesnia|października|pazdziernika|listopada|grudnia"
 )
 
-#: A written date: 15.03.1985, 15-03-1985, 15/03/1985, 15 marca 1985 or 1985-03-15.
+#: English month names and their abbreviations, for dates in a CV or a form written in English.
+_EN_MONTHS = (
+    "january|february|march|april|may|june|july|august|september|october|november|december"
+    "|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec"
+)
+
+#: A written date: 15.03.1985, 15-03-1985, 15/03/1985, 15 marca 1985, 1985-03-15, and in English
+#: 15 March 1985 or March 15, 1985. Without the English forms, "date of birth: 15 March 1985" went
+#: out whole.
 _DATE_VALUE = (
     r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4}"
     rf"|\d{{1,2}}\s+(?:{_MONTHS})\s+\d{{4}}"
     r"|\d{4}-\d{2}-\d{2}"
+    rf"|\d{{1,2}}(?:st|nd|rd|th)?\s+(?i:{_EN_MONTHS})\.?,?\s+\d{{4}}"
+    rf"|(?i:{_EN_MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}"
 )
 #: Words that introduce a birth date: "ur.", "urodzona", "data urodzenia:", "DOB", "geb.".
 _BIRTH_LABEL = (
@@ -349,13 +425,20 @@ PATTERNS: list[Rule] = [
         ),
         None,
     ),
+    # An address written to slip past harvesters: "jan.kowalski [at] example.com", "(małpa)",
+    # "[dot]". Only the bracketed forms: a bare "at" between two words is ordinary English.
+    ("EMAIL", OBFUSCATED_EMAIL_PATTERN, None),
+    # A link to a person's own page: LinkedIn puts the name in it, and a GitHub login reappears in
+    # every repository and in the user's pages. Only the part up to the handle is masked, so
+    # "<LINK_1>/weather-app" still tells the model which project it is. See _LOCATORS.
+    ("LINK", PROFILE_LINK_PATTERN, None),
     (
         "PHONE",
         re.compile(
             r"\(\d{2,3}\)[ -]?\d{3}[ -]?\d{2}[ -]?\d{2}(?!\d)"
-            # "0048" is how a Polish number is dialled from abroad and how half of them are written
-            # down; without it the digits after the prefix look like a run of eleven, not a phone.
-            r"|(?<!\d)(?:\+48[ -]?|0048[ -]?)?"
+            # "0048" is how a Polish number is dialled from abroad; bare "48" is also used in
+            # SMS gateway output and CRM exports (#6). The lookbehind avoids taking a time's ":48".
+            r"|(?<!\d)(?:\+48[ -]?|0048[ -]?|(?<!\d:)48[ -]?(?=[1-9]))?"
             r"(?:\d{3}[ -]?\d{3}[ -]?\d{3}|\d{2}[ -]?\d{3}[ -]?\d{2}[ -]?\d{2}"
             r"|\d{2}[ -]?\d{7})(?!\d)"
         ),
@@ -373,6 +456,7 @@ PATTERNS: list[Rule] = [
         lambda value: any(c.isalpha() for c in value),
     ),
     ("ADDRESS", ADDRESS_PATTERN, None),
+    ("ADDRESS", ADDRESS_BEFORE_POSTCODE_PATTERN, None),
     ("VIN", re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b"), is_valid_vin),
     # A lowercase VIN only after its label: seventeen lowercase letters and digits are a request
     # id, a session key or a hash far more often, and a European VIN carries no check digit.
@@ -580,7 +664,47 @@ def _locate_regon(text: str, match: re.Match[str]) -> list[tuple[int, int]]:
     return [match.span()]
 
 
+def _locate_address(text: str, match: re.Match[str]) -> list[tuple[int, int]]:
+    """Return an address once: a street the rule with "ul." reads is left to that rule.
+
+    "ul. gen. Andersa 15, 00-159" is also "Andersa 15" before a postcode, and two spans for one
+    address made it two values.
+    """
+    if match.re is not ADDRESS_BEFORE_POSTCODE_PATTERN:
+        return [match.span()]
+    window = max(0, match.start() - 2 * _LABEL_REACH)
+    for prefixed in ADDRESS_PATTERN.finditer(text, window, match.end()):
+        if prefixed.start() <= match.start() < prefixed.end():
+            return []
+    return [match.span()]
+
+
+def _locate_profile_link(text: str, match: re.Match[str]) -> list[tuple[int, int]]:
+    """Return a profile link up to its handle, unless the path is one of the site's own pages."""
+    return [match.span()] if _handle_of(match) is not None else []
+
+
+def _handle_of(match: re.Match[str]) -> str | None:
+    handle = match.group("handle") or match.group("page")
+    if len(handle) < 2 or handle.lower() in _SITE_PAGES:
+        return None
+    return handle
+
+
+def profile_handle(link: str) -> str | None:
+    """Return the handle a profile link names, or None when it is not a link to a person's page.
+
+    "https://github.com/jkowalski/weather-app" and "jkowalski.github.io" name "jkowalski", and
+    "linkedin.com/in/jan-kowalski-1a2b" names "jan-kowalski-1a2b". The pipeline masks such a handle
+    wherever it appears on its own: in a JSON field, after "@", in a repository's name.
+    """
+    match = PROFILE_LINK_PATTERN.match(link.strip())
+    return None if match is None else _handle_of(match)
+
+
 _LOCATORS: dict[str, Locator] = {
+    "ADDRESS": _locate_address,
+    "LINK": _locate_profile_link,
     "PESEL": _locate_pesel,
     "REGON": _locate_regon,
     "IBAN": _locate_iban,

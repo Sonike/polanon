@@ -47,17 +47,17 @@ _MALE_NAMES = _words(
     """
     Adam Adrian Alan Albert Aleks Aleksander Alfred Andrzej Antoni Arkadiusz Artur August
     Bartłomiej Bartosz Benedykt Bernard Błażej Bogdan Bogumił Bogusław Bolesław Borys Bronisław
-    Cezary Czesław Damian Daniel Dariusz Dawid Dominik Edmund Edward Emanuel Emil Ernest Eryk
-    Eugeniusz Fabian Feliks Filip Florian Franciszek Fryderyk Gabriel Gerard Gracjan Grzegorz
+    Cezary Cyprian Czesław Damian Daniel Dariusz Dawid Dominik Edmund Edward Emanuel Emil Ernest
+    Eryk Eugeniusz Fabian Feliks Filip Florian Franciszek Fryderyk Gabriel Gerard Gracjan Grzegorz
     Gustaw Henryk Hieronim Hubert Ignacy Igor Ireneusz Jacek Jakub Jan Janusz Jarosław Jędrzej
     Jerzy Joachim Józef Julian Juliusz Kacper Kajetan Kamil Karol Kazimierz Klaudiusz Konrad
     Konstanty Kornel Krystian Krzysztof Ksawery Lech Leon Leonard Leszek Longin Lucjan Ludwik
-    Łukasz Maciej Maks Maksymilian Marcel Marcin Marek Marian Mariusz Mateusz Michał Mieczysław
-    Mikołaj Miłosz Mirosław Natan Nataniel Nikodem Norbert Olaf Olgierd Oliwer Oskar Patryk Paweł
-    Piotr Przemysław Radosław Rafał Remigiusz Robert Roman Ryszard Sebastian Seweryn Sławomir
-    Stanisław Stefan Szczepan Szymon Tadeusz Teodor Tobiasz Tomasz Tymon Tymoteusz Wacław Waldemar
-    Walenty Wiesław Wiktor Wincenty Witold Władysław Włodzimierz Wojciech Zbigniew Zdzisław Zenon
-    Zygmunt
+    Łukasz Maciej Maks Maksymilian Marcel Marcin Marek Marian Mariusz Mateusz Maurycy Michał
+    Mieczysław Mikołaj Miłosz Mirosław Natan Nataniel Nikodem Norbert Olaf Olgierd Oliwer Oliwier
+    Oskar Patryk Paweł Piotr Przemysław Radosław Rafał Remigiusz Robert Roman Ryszard Sebastian
+    Seweryn Sławomir Stanisław Stefan Szczepan Szymon Tadeusz Teodor Tobiasz Tomasz Tymon Tymoteusz
+    Wacław Waldemar Walenty Wiesław Wiktor Wincenty Witold Władysław Włodzimierz Wojciech Zbigniew
+    Zdzisław Zenon Zygmunt
     Adaś Antek Bartek Bolek Czesiek Darek Franek Grzesiek Heniek Janek Jarek Jasiek Jaś Józek
     Julek Jurek Kazek Krzysiek Kuba Kubuś Maciek Mietek Mirek Olek Piotrek Przemek Radek Romek
     Rysiek Sławek Staś Staszek Szymek Tadek Tadzio Tomek Tymek Waldek Wiesiek Witek Władek Wojtek
@@ -69,15 +69,16 @@ _FEMALE_NAMES = _words(
     """
     Ada Adrianna Agata Agnieszka Aldona Aleksandra Alicja Alina Amelia Anastazja Aneta Angelika
     Aniela Anita Anna Antonina Apolonia Aurelia Barbara Beata Bianka Blanka Bogumiła Bogusława
-    Bożena Bronisława Cecylia Czesława Dagmara Danuta Daria Diana Dominika Dorota Edyta Eliza
-    Elwira Elżbieta Emilia Emma Ewa Ewelina Felicja Gabriela Genowefa Grażyna Halina Hanna Helena
-    Honorata Iga Ilona Irena Iwona Izabela Jadwiga Jagoda Janina Joanna Jolanta Józefa Judyta
-    Julia Julita Justyna Kaja Kalina Kamila Karina Karolina Katarzyna Kinga Klara Klaudia Kornelia
-    Krystyna Laura Lena Leokadia Lidia Liliana Liwia Lucyna Ludmiła Łucja Magdalena Maja Malwina
-    Małgorzata Marcelina Maria Marianna Mariola Marta Martyna Marzena Michalina Milena Mirosława
-    Monika Nadia Natalia Nela Nikola Nina Olga Oliwia Patrycja Paula Paulina Pola Regina Renata
-    Roksana Rozalia Róża Sabina Sandra Sara Sonia Stanisława Stefania Sylwia Tamara Teresa Urszula
-    Wanda Weronika Wiesława Wiktoria Wioletta Władysława Zdzisława Zofia Zuzanna Żaneta
+    Bożena Bronisława Cecylia Celina Czesława Dagmara Danuta Daria Diana Dominika Dorota Edyta
+    Eliza Elwira Elżbieta Emilia Emma Ewa Ewelina Felicja Gabriela Genowefa Grażyna Halina Hanna
+    Helena Honorata Iga Ilona Irena Iwona Izabela Jadwiga Jagoda Janina Joanna Jolanta Józefa
+    Judyta Julia Julita Justyna Kaja Kalina Kamila Karina Karolina Katarzyna Kinga Klara Klaudia
+    Kornelia Krystyna Ksenia Laura Lena Leokadia Lidia Liliana Lilianna Liwia Lucyna Ludmiła Łucja
+    Magdalena Maja Malwina Małgorzata Marcelina Maria Marianna Mariola Marta Martyna Marzena
+    Matylda Melania Michalina Milena Mirosława Monika Nadia Natalia Nela Nikola Nina Olga Oliwia
+    Otylia Patrycja Paula Paulina Pola Regina Renata Roksana Rozalia Róża Sabina Sandra Sara Sonia
+    Stanisława Stefania Sylwia Tamara Teresa Urszula Wanda Weronika Wiesława Wiktoria Wioletta
+    Władysława Zdzisława Zofia Zuzanna Żaneta
     Aga Ania Asia Basia Baśka Danusia Ela Gosia Gośka Hania Iza Jadzia Joasia Jola Julka Kasia
     Kaśka Krysia Madzia Magda Majka Małgosia Marysia Ola Oliwka Tosia Ula Wiola Zosia Zuzia
     """
@@ -427,13 +428,21 @@ _FIELD_END = re.compile(r"[ \t\u00a0]*(?:[,;]|\r?\n|$)")
 _LABEL_GAP = re.compile(r":[ \t\u00a0]*")
 _SUBJECT_PREFIXES = frozenset(_words("dotyczy fw fwd odp pd re temat"))
 
-#: A day of the month before a word and a year after it, or both after it in the American order:
-#: "15 Jan 2024", "15. Mai 2024", "Jan 15, 2024".
+#: Space-based dates retain their original rules: "15 Jan 2024", "Jan 15, 2024".
 _DAY = r"(?:0?[1-9]|[12]\d|3[01])"
 _DAY_BEFORE = re.compile(rf"(?<![\d.,:]){_DAY}\.?[ \t\u00a0]+$")
 _YEAR_AFTER = re.compile(r"\.?,?[ \t\u00a0]+(?:19|20)\d\d(?!\d)")
 _DAY_AND_YEAR_AFTER = re.compile(
     rf"\.?[ \t\u00a0]+{_DAY}(?:st|nd|rd|th)?,?[ \t\u00a0]+(?:19|20)\d\d(?!\d)"
+)
+
+#: Punctuated dates require the same single separator on both sides of the month.
+_SEPARATED_DAY_BEFORE = re.compile(rf"(?<![\d.,:]){_DAY}(?P<separator>[-/.])$")
+_SEPARATED_YEAR_AFTER = re.compile(r"(?P<separator>[-/.])(?:19|20)\d\d(?!\d)")
+_SEPARATED_YEAR_BEFORE = re.compile(r"(?<![\d.,:])(?:19|20)\d\d(?P<separator>[-/.])$")
+_SEPARATED_DAY_AFTER = re.compile(rf"(?P<separator>[-/.]){_DAY}(?!\d)")
+_SEPARATED_DAY_AND_YEAR_AFTER = re.compile(
+    rf"(?P<separator>[-/.]){_DAY}(?:st|nd|rd|th)?(?P=separator)(?:19|20)\d\d(?!\d)"
 )
 
 
@@ -442,6 +451,46 @@ def is_common_adjective(word: str) -> bool:
     folded = fold(word)
     match = _ADJECTIVE_FORM.search(folded)
     return match is not None and folded[: match.start("ending")] in _COMMON_ADJECTIVES
+
+
+def person_name_parts(name: str, *, needs_first_name: bool = False) -> list[str]:
+    """Return the words of a person's name that point to the person on their own: the surname.
+
+    "Jan Kowalski" gives "Kowalski", "Anna Nowak-Kępa" gives "Nowak-Kępa", "Nowak" and "Kępa".
+    A first name this guard knows is left out, and so are titles, initials and common adjectives:
+    "Jan" or "Krakowska" alone point to nobody. A first name the guard does not know is kept, since
+    nothing tells it from the surname.
+
+    Args:
+        name: a detected name of two to four words.
+        needs_first_name: give parts only when the name has a first name this guard knows, for a
+            name whose detection cannot be trusted on its own.
+    """
+    words = name.split()
+    if not 2 <= len(words) <= 4:
+        return []
+    parts: list[str] = []
+    has_first_name = False
+    for word in words:
+        bare = word.strip(".,;:()")
+        key = fold(bare)
+        if all(part in NAME_FORMS for part in key.split("-")):  # "Jan", "Anna-Maria"
+            has_first_name = True
+            continue
+        if len(bare) < 3 or not _WORD.fullmatch(bare) or not _name_shaped(bare):
+            continue
+        if key in HONORIFICS or key in _ABBREVIATIONS or key in _NOT_NAMES or key in _ROLES:
+            continue
+        if is_common_adjective(bare):
+            continue
+        parts.append(bare)
+        if "-" in bare:
+            parts.extend(
+                part for part in bare.split("-") if len(part) >= 3 and fold(part) not in NAME_FORMS
+            )
+    if needs_first_name and not has_first_name:
+        return []
+    return parts
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,17 +703,35 @@ def _abbreviates(text: str, words: list[_Word], title: int, index: int) -> bool:
 
 
 def _in_a_date(text: str, word: _Word) -> bool:
-    """Whether a first name stands where a month does: "15 Jan 2024", "15. Mai 2024".
+    """Whether a first name occupies the month in a space-based or punctuated date.
 
-    English, German and French month names share their spelling with Jan and with Maja's
-    genitive. Between a day and a year, or before both, they are the month and never a person.
+    English, German and French months share spellings with Jan and Maja's genitive.
+    Punctuated dates use matching separators: "15-Jan-2024", "2024/Jan/15", "Jan.15.2024".
+    Spaces keep the original day-first/month-first rules, since "2023 Anna 2" is not a date.
     """
     if _DAY_AND_YEAR_AFTER.match(text, word.end) is not None:
         return True
-    return (
+    before = max(0, word.start - 8)
+    if (
         _YEAR_AFTER.match(text, word.end) is not None
-        and _DAY_BEFORE.search(text, max(0, word.start - 8), word.start) is not None
-    )
+        and _DAY_BEFORE.search(text, before, word.start) is not None
+    ):
+        return True
+    if _SEPARATED_DAY_AND_YEAR_AFTER.match(text, word.end) is not None:
+        return True
+    for before_pattern, after_pattern in (
+        (_SEPARATED_DAY_BEFORE, _SEPARATED_YEAR_AFTER),
+        (_SEPARATED_YEAR_BEFORE, _SEPARATED_DAY_AFTER),
+    ):
+        preceding = before_pattern.search(text, before, word.start)
+        following = after_pattern.match(text, word.end)
+        if (
+            preceding is not None
+            and following is not None
+            and preceding["separator"] == following["separator"]
+        ):
+            return True
+    return False
 
 
 def _labelled(text: str, words: list[_Word], index: int) -> bool:
