@@ -90,6 +90,7 @@ modelu, gdy imiona i nazwiska w nim zawarte oraz przywrócona odpowiedź liczą 
 | Identyfikatory, dane kontaktowe, sekrety, polskie imiona i nazwiska, nazwy firm rozpoznawane po formie prawnej | `pip install polanon` |
 | Dodatkowo miejsca oraz imiona, nazwiska i organizacje, których nie wychwyci żadna reguła | `pip install "polanon[ner]"`, a potem `python -m spacy download pl_core_news_md` |
 | Sędziowie etapu 2 (lokalny model w Ollamie albo zdalny) | `pip install "polanon[judge]"` |
+| Komponenty do potoków [Haystacka 3](#z-haystackiem) | `pip install "polanon[haystack]"` |
 
 Następnie użyj `default_guards()` z modelem albo `default_guards(with_ner=False)` bez niego.
 Inny model spaCy to kwestia jednego argumentu: `default_guards(spacy_model="pl_core_news_lg")`.
@@ -250,6 +251,172 @@ też nim jest, gdy brakuje spaCy albo modelu, a `ner_available()` pozwala stroni
 czy są zainstalowane. Gdy przyjdzie odpowiedź, `turn.unknown_tokens(answer)` wypisuje tokeny
 wymyślone przez model, a `turn.sweep(restored)` szuka też danych osobowych, które dodała odpowiedź.
 
+## Maskowanie dla RAG i indeksów wyszukiwania
+
+Tokeny numerowane w każdym wywołaniu od nowa nic nie znaczą poza swoją rozmową: umowa zamaskowana
+do indeksu wyszukiwania i pytanie zamaskowane tydzień później mogą nazwać `<OSOBA_1>` dwie różne
+osoby, a wyszukiwanie nic nie znajdzie. Daj anonimizatorowi tajny klucz, a każdy token będzie
+obliczany: z HMAC-SHA256 wartości pod tym kluczem, taki sam w każdym dokumencie, każdym procesie
+i każdym pytaniu, bez żadnego wspólnego stanu. „Jan Kowalski”, „Jana Kowalskiego” i „z Janem
+Kowalskim” dostają jeden token, tak samo NIP zapisany z myślnikami i bez nich.
+
+```python
+import os
+
+from polanon import Anonymizer, InMemoryMappingStore, Pseudonyms, default_guards, stored_mapping
+
+key = bytes.fromhex(os.environ["POLANON_KEY"])  # 32 losowe bajty na firmę, z magazynu sekretów
+store = InMemoryMappingStore()  # w produkcji twoja zaszyfrowana tabela, poza indeksem
+pseudonyms = Pseudonyms(key, collisions=store.collisions)
+anonymizer = Anonymizer(default_guards(with_ner=False), pseudonyms=pseudonyms)
+
+document = anonymizer.index_chunks(
+    [
+        "Umowę z Firmą Kot Sp. z o.o. podpisał Jan Kowalski.",
+        "Pełnomocnikiem Jana Kowalskiego jest Anna Nowak, tel. 600 100 200.",
+    ],
+    store,
+)
+for text in document.texts:  # same tokeny: to idzie do embeddera i do indeksu
+    index.add(text, embed(text))  # index i embed są twoje
+
+question = anonymizer.mask_query("Kto jest pełnomocnikiem Jana Kowalskiego?", store)
+passages = index.search(embed(question.anonymized))  # pytanie ma tokeny fragmentów
+
+mapping = question.mapping | stored_mapping(store, question.anonymized, *passages)
+restorer = Anonymizer.stream_restorer(mapping)  # przywraca odpowiedź, jak w Strumieniowaniu
+```
+
+Testy uruchamiają ten przykład dokładnie w tej postaci, z zastępczym indeksem i embedderem. Po
+kolei:
+
+**Nic w indeksie nie nazywa wartości.** `document.texts` zawiera tokeny w miejscu wartości, a to,
+co każdy token oznacza, trafia do magazynu. Nigdy nie kopiuj mapowania do metadanych fragmentu,
+które są zapisywane i przeszukiwane razem z nim. `document.mappings[i]` przywraca fragment `i`
+dokładnie tak, jak został napisany, „Jana Kowalskiego” w dopełniaczu; trzymaj je przy fragmencie,
+zaszyfrowane, poza indeksem.
+
+**Własny magazyn.** `MappingStore` ma dwie metody: `get(tokens)` i `add(entries)`, która zapisuje
+tylko tokeny, których jeszcze nie ma, atomowo dla każdego tokenu, jak robi to unikalny klucz na
+tokenie. Dla pozostałych zwraca to, co już ma. Szyfruj `StoredValue.value`, bo to są dane osobowe;
+`fingerprint` bez klucza niczego nie zdradza. Trzymaj obok `store.collisions` i przekazuj go do
+każdego `Pseudonyms`: są tam tylko tokeny i odciski, nic więcej.
+
+**W jakiej formie wraca nazwisko.** Jeden token oznacza „Jan Kowalski” i „Jana Kowalskiego”.
+Magazyn trzyma mianownik, bo model wpisuje token we własne zdanie, a „Umowę podpisał Jana
+Kowalskiego” byłoby błędem bez względu na to, który dokument trafił do indeksu pierwszy. Fragment
+przywrócony własnym mapowaniem zachowuje przypadek, w którym go napisano.
+
+**Nazwiska, które magazyn już zna.** Samo nazwisko, jak w „Co podpisał Kowalczyk?”, to nazwa,
+której nie odczyta żadna reguła. `index_chunks` zapisuje w magazynie nazwisko każdej osoby, której
+imię znają reguły, obok pełnego imienia i nazwiska, a `mask_query` i `index_chunks` sprawdzają w
+magazynie każdy ciąg do czterech słów i maskują te, dla których ma token. Pytanie dostaje wtedy
+token nazwiska, a nazwisko zamaskowane w jednym dokumencie pozostaje zamaskowane w następnym. Przy
+magazynie, który jest na to za wolny, przekaż `lookup=False`.
+
+**Klucz.** Co najmniej 32 losowe bajty, jeden klucz na firmę i osobny `scope=` dla indeksu, którego
+nie wolno powiązać z innym. Trzymaj go w menedżerze sekretów, poza indeksem, kodem i logami;
+`Pseudonyms` nigdy go nie pokazuje, nie serializuje ani nie kopiuje. Nowy klucz, zakres albo liczba
+cyfr zmienia każdy token, więc indeks trzeba zbudować od nowa: zapisz `pseudonyms.settings` razem z
+indeksem i porównuj je przy starcie. Żeby usunąć dane osoby, usuń fragmenty zawierające
+`pseudonyms.token(name, "PERSON")`, a także te z tokenem jej nazwiska, jeśli w indeksie nie ma
+nikogo innego o tym nazwisku. Samo usunięcie wpisów z magazynu nie zrywa powiązania, bo klucz
+zamienia odgadniętą wartość z powrotem w token.
+
+**Kolizje.** Przy dwunastu cyfrach dwie wartości jednego typu dzielą token z szansą około 1 do
+20 000 przy 10 000 wartości i 1 do 200 przy 100 000. Gdziekolwiek takie dwie wartości się spotkają,
+w magazynie albo w jednym tekście, ta, która przyszła druga, dostaje cztery cyfry więcej.
+
+**Ograniczenia.** Imię albo nazwisko, którego reguły nie umieją odmienić, na przykład rzadkie imię
+albo „Krawca” od „Krawiec”, i nazwa firmy w innym przypadku, „Firmą Kot” obok „Firma Kot”, mają token na
+każdą formę, co kosztuje chybione wyszukiwanie, ale niczego nie ujawnia. Samotne słowo pisane małą
+literą nigdy nie jest sprawdzane w magazynie. A jeden token wszędzie to cel i zarazem cena: kto czyta
+wiele zamaskowanych fragmentów, widzi, które dotyczą tej samej osoby. Co to oznacza, opisuje
+[model zagrożeń](https://github.com/boromat/polanon/blob/main/docs/THREAT_MODEL.md#stable-pseudonyms-for-search-indexes).
+
+## Z Haystackiem
+
+`pip install "polanon[haystack]"` dodaje komponenty, które wpinają maskowanie w potok
+[Haystacka 3](https://haystack.deepset.ai/). Klucz jest czytany ze zmiennej `POLANON_KEY`: 32
+losowe bajty zapisane szesnastkowo:
+
+```python
+from haystack import Pipeline
+from haystack.components.preprocessors import DocumentSplitter
+from haystack.components.writers import DocumentWriter
+from polanon import InMemoryMappingStore
+from polanon.integrations.haystack import (
+    PolanonDocumentMasker,
+    PolanonQueryMasker,
+    PolanonRestorer,
+    PolanonStreamRestorer,
+)
+
+mappings = InMemoryMappingStore()  # w produkcji twoja zaszyfrowana tabela
+
+indexing = Pipeline()
+indexing.add_component("mask", PolanonDocumentMasker(store=mappings))
+indexing.add_component("split", DocumentSplitter(split_by="period"))
+indexing.add_component("embed", document_embedder)  # dowolny embedder: dostaje zamaskowany tekst
+indexing.add_component("write", DocumentWriter(document_store))
+indexing.connect("mask", "split")
+indexing.connect("split", "embed")
+indexing.connect("embed", "write")
+
+asking = Pipeline()  # z twoim embedderem, retrieverem, budowniczym promptu i generatorem
+asking.add_component("mask", PolanonQueryMasker(store=mappings))  # pierwszy
+asking.add_component("restore", PolanonRestorer(store=mappings))  # po generatorze
+asking.connect("mask.query", "embed.text")
+asking.connect("mask.query", "prompt.query")
+asking.connect("retrieve.documents", "restore.documents")
+asking.connect("llm.replies", "restore.replies")
+asking.connect("mask.mapping", "restore.mapping")
+
+stream = PolanonStreamRestorer(mappings, on_text=lambda text: print(text, end=""))
+asking.run({"mask": {"query": question, "stream": stream}, "llm": {"streaming_callback": stream}})
+```
+
+[`examples/haystack_rag.py`](https://github.com/boromat/polanon/blob/main/examples/haystack_rag.py)
+to całość, offline, z zastępczym embedderem i generatorem Haystacka; testy go uruchamiają.
+[`examples/haystack_openai.py`](https://github.com/boromat/polanon/blob/main/examples/haystack_openai.py)
+to samo z embedderem i modelem OpenAI: jest płatny, więc testy tylko go budują.
+
+**Najpierw maskowanie.** Maskownik dokumentów stoi przed splitterem, więc czyta cały dokument i
+maskuje firmę czy adres tam, gdzie stoją: pocięta najpierw na kropkach „Firmą Kot Sp. z o.o.”
+rozpadła się i poszła niezamaskowana. Fragmenty, które przychodzą już pocięte, są maskowane razem,
+gdy wskazują jedno źródło w `source_id`, `parent_id` albo `__parent_id`. Tnij po słowach, zdaniach,
+kropkach albo akapitach: splitter liczący znaki przecina tokeny na pół, a połówka niczego nie trafia.
+
+**Nic w magazynie dokumentów nie nazywa wartości.** Zamaskowane dokumenty są nowe: tokeny w treści
+i w każdym tekście `meta`, także w kluczach zagnieżdżonych słowników i w elementach zbiorów. `id`
+dokumentu to zwykły SHA-256 jego tekstu, więc każdy napis w `meta` w tym kształcie, czyli to, co
+zapisują tam splittery, wskazuje na zamaskowany odpowiednik swojego dokumentu albo staje się
+odciskiem z kluczem. `id` policzone przez Haystacka jest liczone od nowa z zamaskowanego dokumentu, a
+nadane przez ciebie jest maskowane jak tekst i zostaje, więc upsert i usuwanie po `id` dalej działają.
+To, co oznaczają tokeny, trafia wyłącznie do magazynu mapowań, nigdy do `meta`. Dokument z `blob` albo z
+embeddingiem jest odrzucany, bo oba powstały z oryginału. Testy sprawdzają każdy dokument w
+magazynie i zapisany przez niego plik pod kątem każdej oryginalnej wartości.
+
+**Odpowiedź dla czytelnika.** `PolanonQueryMasker` wysyła zamaskowane pytanie do embeddera i do
+budowniczego promptu, a swoje `mapping` do `PolanonRestorer`, który przywraca odpowiedzi i
+znalezione dokumenty. Jego dokumenty służą tylko do wyświetlenia: nigdy nie zapisuj ich do magazynu
+i nie wysyłaj do modelu. `PolanonStreamRestorer` przywraca odpowiedź w strumieniu jako
+`streaming_callback` generatora; przy `Pipeline.stream()` podawaj mu fragmenty sam:
+`stream.feed(chunk.content)`. Wartości, o których wiesz, że są wrażliwe, na przykład nazwy klientów,
+podajesz w czasie uruchomienia, `{"mask": {"known": clients}}`, więc nigdy nie trafiają do zapisanego
+potoku.
+
+**Zapisywanie potoku.** Klucz to `Secret` Haystacka, a zapisany potok zawiera tylko nazwę jego
+zmiennej. Magazyn mapowań zapisuje się przez własne `to_dict`, które powinno mówić, dokąd się łączy,
+a nigdy, co przechowuje; `InMemoryMappingStore` go nie ma, więc potok z nim budujesz w kodzie.
+Haystack 3 wczytuje klasy tylko z własnych modułów, więc dopuść ten moduł i moduł swojego magazynu:
+`Pipeline.loads(text, allowed_modules=["polanon.integrations.haystack", "myapp.vault"])`.
+
+**Content tracing zostaw wyłączony.** Przy `HAYSTACK_CONTENT_TRACING_ENABLED` Haystack zapisuje
+to, co dostaje każdy komponent, a maskownik dostaje oryginały. Nieudane uruchomienie zachowuje swoje
+wejścia w snapshocie błędu, zapisywanym na dysk przy `HAYSTACK_PIPELINE_SNAPSHOT_SAVE_ENABLED`. Oba
+są domyślnie wyłączone.
+
 ## Co wykrywa
 
 Polskie identyfikatory walidowane sumą kontrolną (PESEL, NIP, REGON, dowód osobisty, IBAN, karty
@@ -279,9 +446,10 @@ modelem: 66% zamaskowanych w całości, 76% przy najłagodniejszym sposobie licz
 
 ## Warto wiedzieć
 
-**Tokeny są stabilne w obrębie rozmowy, a nie globalnie.** Przekaż mapowanie z ostatniego wyniku do
-kolejnego wywołania: ta sama wartość zachowuje ten sam token, a token nigdy nie zostaje ponownie
-użyty dla innej wartości. Przekazane mapowanie jest tylko odczytywane, a nie zmieniane, więc
+**Tokeny są stabilne w obrębie rozmowy, a nie globalnie**, chyba że podasz klucz, jak dla
+[indeksu wyszukiwania](#maskowanie-dla-rag-i-indeksów-wyszukiwania). Przekaż mapowanie z ostatniego
+wyniku do kolejnego wywołania: ta sama wartość zachowuje ten sam token, a token nigdy nie zostaje
+ponownie użyty dla innej wartości. Przekazane mapowanie jest tylko odczytywane, a nie zmieniane, więc
 zachowuj to, które zwraca każdy wynik:
 
 ```python
@@ -425,6 +593,9 @@ wpisy z denylisty i wartości zamaskowane już wcześniej w rozmowie pozostają 
 | `judge/` | opcjonalny drugi etap: model przegląda zamaskowany tekst pod kątem tego, co wciąż pozwala kogoś zidentyfikować |
 | `stream_restore.py` | wstawia oryginały z powrotem do odpowiedzi przesyłanej strumieniowo, nie rozcinając tokenu |
 | `turn.py` | maskuje jednym mapowaniem wszystko, co wysyła jedno wywołanie modelu, i przywraca to, co wraca |
+| `pseudonyms.py` | oblicza stałe tokeny z tajnego klucza, takie same w każdym dokumencie i procesie |
+| `index.py` | maskuje dokumenty i pytania dla indeksu wyszukiwania, z magazynem tego, co kryją tokeny |
+| `integrations/haystack.py` | komponenty Haystacka, które maskują dokumenty i pytania i przywracają odpowiedzi |
 | `output_sweep.py` | oznacza wymyślone tokeny i dane osobowe, które wprowadziła odpowiedź |
 
 ## Dodawanie detektora

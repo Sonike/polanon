@@ -11,8 +11,10 @@ python -m spacy download pl_core_news_md
 pre-commit install
 ```
 
-Add `pip install anthropic openai` if you touch `examples/`: their tests run against the real SDKs,
-offline, and are skipped without them.
+Add `pip install -e ".[haystack]"` if you touch `polanon/integrations/haystack.py` or the Haystack
+examples: `tests/test_haystack.py` runs where the extra is installed, and a CI job of its own
+checks it with mypy and measures its coverage. Add `pip install anthropic openai` if you touch
+`examples/`: their tests run against the real SDKs, offline, and are skipped without them.
 
 ## Quality bar
 
@@ -54,3 +56,12 @@ Subclass `Guard`, return `Span`s in original-text coordinates and respect the `e
 README's *Adding a detector* section has a complete example. Score 1.0 for what a checksum, a label
 or an official format vouches for and 0.85 for a statistical guess, and add the type to
 `polanon/policy.py` if it should be built in.
+
+## Version numbers
+
+Until 1.0 the second number goes up only when something that worked stops working the same way: a
+public name or signature that changes or goes away, a Python version that is dropped, or a new
+scheme of stable pseudonyms, which gives an index built before other tokens than the questions
+after it. New features and fixes go out under the third number, also when a fix changes what is
+masked, since that is what it is for. Each release says in `CHANGELOG.md` which of these it is.
+1.0.0 comes once the public API has settled.

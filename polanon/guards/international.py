@@ -288,8 +288,14 @@ _NAME_PART = rf"[{_UPPER}]{_LOWER}+"
 _MIXED_NAME = rf"(?:Ma?c|Fitz|De|Di|Le|La|Van|[OD]['\u2019])?{_NAME_PART}(?:-{_NAME_PART})*"
 _CAPS_NAME = rf"[{_UPPER}]{{2,}}(?:-[{_UPPER}]{{2,}})*"
 _WORD_END = r"(?![^\W\d_]|['\u2019-][^\W\d_])"
-_ADDRESSED_WORD = rf"(?!{_NOT_A_NAME}){_MIXED_NAME}{_WORD_END}"
-_NAME_WORD = rf"(?!{_NOT_A_NAME})(?:{_MIXED_NAME}|{_CAPS_NAME}){_WORD_END}"
+
+_HONORIFIC = r"\b(?:Mr|Mrs|Ms|Miss|Mx|Dr|Prof|Sir|Dame|Herr|Frau|Mme|Mlle|Monsieur|Madame)\.?"
+#: A form of address is never a word of the name: "Frau Prof. Schmidt" read "Prof" as her name,
+#: and every "Prof" further down was masked as that person.
+_NOT_A_TITLE = rf"(?!{_HONORIFIC}(?![^\W\d_]))"
+
+_ADDRESSED_WORD = rf"(?!{_NOT_A_NAME}){_NOT_A_TITLE}{_MIXED_NAME}{_WORD_END}"
+_NAME_WORD = rf"(?!{_NOT_A_NAME}){_NOT_A_TITLE}(?:{_MIXED_NAME}|{_CAPS_NAME}){_WORD_END}"
 _INITIAL = rf"[{_UPPER}]\.[ \t]?"
 
 #: Lowercase particles inside a surname: "van Dijk", "von der Leyen", "de la Cruz".
@@ -298,10 +304,15 @@ _PARTICLE = (
     r"(?:[ \t]+(?:der|den|de|la|las|los|le))?[ \t]+"
 )
 
+#: The forms of address in front of a name after a label, kept out of the name: "z. Hd. Frau
+#: Wiśniewska" read whole made "Frau" the first name, so every "Frau" further down was masked as
+#: that person, and "Attn: Mr Oliver Bennett" got a token apart from "Oliver Bennett".
+_TITLE_BEFORE = rf"(?:{_HONORIFIC}[ \t]+)*{_NOT_A_TITLE}"
+
 #: A personal name: first and last name, or initials and a surname ("F.Coggle", "J. R. Smith").
 #: Names in capitals count only with at least two words, as "OLIVER BENNETT" under a sign-off.
 _PERSON_NAME = (
-    rf"(?P<value>(?:{_INITIAL})+{_NAME_WORD}"
+    rf"{_TITLE_BEFORE}(?P<value>(?:{_INITIAL})+{_NAME_WORD}"
     rf"|{_NAME_WORD}(?:[ \t]+(?:{_INITIAL})?(?:{_PARTICLE})?{_NAME_WORD}){{1,3}})"
 )
 
@@ -311,8 +322,6 @@ _ADDRESSED_NAME = (
     rf"(?P<value>(?:{_INITIAL})*(?:{_PARTICLE})?{_ADDRESSED_WORD}"
     rf"(?:[ \t]+(?:{_PARTICLE})?{_ADDRESSED_WORD}){{0,2}})"
 )
-
-_HONORIFIC = r"\b(?:Mr|Mrs|Ms|Miss|Mx|Dr|Prof|Sir|Dame|Herr|Frau|Mme|Mlle|Monsieur|Madame)\.?"
 
 _PERSON_LABEL = (
     r"(?i:\b(?:Attn|Attention|Contact(?:[ \t]+person)?|Kontaktperson|Ansprechpartner(?:in)?"
@@ -738,7 +747,12 @@ RULES: list[Rule] = [
         _plausible_caps_company,
         0.95,
     ),
-    ("PERSON", re.compile(rf"{_HONORIFIC}[ \t]+{_ADDRESSED_NAME}"), None, 0.9),
+    (
+        "PERSON",
+        re.compile(rf"{_HONORIFIC}(?:[ \t]+{_HONORIFIC})*[ \t]+{_ADDRESSED_NAME}"),
+        None,
+        0.9,
+    ),
     (
         "PERSON",
         re.compile(rf"{_PERSON_LABEL}[ \t]*[:-]?[ \t]*(?:\r?\n[ \t]*)?{_PERSON_NAME}"),
